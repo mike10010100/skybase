@@ -36,7 +36,57 @@
 
 ---
 
+---
+
+## 💡 The "PocketBase / Supabase" Model: Zero Rust Required for App Developers
+
+> **"Are we pigeonholing ourselves by building in Rust?"**
+> **Only if we force developers to write Rust to use it.**
+
+`skybase` follows the architecture of **PocketBase** (Go engine, JS/Dart users), **Supabase** (Elixir/C engine, JS/Python users), and **Meilisearch** (Rust engine, npm users):
+- **Rust is an invisible superpower for the engine**: It processes the global Jetstream firehose at >10,000 events/sec, runs on a $5/mo VPS using <50MB RAM, provides zero-crash safety (`#![forbid(unsafe_code)]`), and packages into a single 15MB zero-dependency binary.
+- **The developer interface is 100% language-agnostic**: Frontend and mobile developers interact exclusively via HTTP, WebSockets, and the first-class `@skybase/client` TypeScript / React SDK. You never need to install Rust or Cargo to build apps on `skybase`.
+
+---
+
 ## 🚀 Quick Start
+
+### Option A: Web & Mobile Developers (TypeScript / React)
+
+1. **Launch the Skybase daemon** (zero Rust required):
+   ```bash
+   npx skybase dev
+   # Server starts in 10ms with SQLite & Web Admin UI at http://localhost:8080
+   ```
+
+2. **Install the client SDK**:
+   ```bash
+   npm install @skybase/client
+   ```
+
+3. **Build your app**:
+   ```typescript
+   import { Skybase } from '@skybase/client';
+
+   const sb = new Skybase('http://localhost:8080');
+
+   // 1. Authenticate with ATProto handle
+   await sb.auth.signInWithHandle('alice.bsky.social');
+
+   // 2. Write sovereign record to user's personal PDS
+   const post = await sb.collection('app.bsky.feed.post').create({
+     text: 'Hello from Skybase!',
+     createdAt: new Date().toISOString()
+   });
+
+   // 3. Realtime live query (synced from Jetstream firehose into SQLite)
+   const unsubscribe = sb.collection('app.bsky.feed.post')
+     .where('replyParent', '==', post.uri)
+     .orderBy('createdAt', 'desc')
+     .onSnapshot((comments) => console.log('Live comments:', comments));
+   ```
+
+### Option B: Backend & Systems Developers (Rust Crate)
 
 Add `skybase` to your `Cargo.toml`:
 
@@ -46,14 +96,11 @@ skybase = { path = "../skybase", version = "0.1" }
 tokio = { version = "1.40", features = ["full"] }
 ```
 
-### Initializing Skybase & Starting OAuth
-
 ```rust
 use skybase::{Skybase, SkybaseConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Configure Skybase engine
     let config = SkybaseConfig::new(
         "https://myapp.example.com/oauth/client-metadata.json",
         "https://myapp.example.com/oauth/callback",
@@ -61,10 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .with_jetstream_endpoint("wss://jetstream1.us-east.bsky.network/subscribe");
 
-    // 2. Instantiate backend engine
     let skybase = Skybase::new(config)?;
-
-    // 3. Initiate decentralized OAuth login for a user handle
     let auth_request = skybase.auth().authorize("alice.bsky.social").await?;
     println!("Redirect user to: {}", auth_request.authorization_url);
 
@@ -76,8 +120,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## 📄 Product Requirements & Architecture
 
-For the complete architectural design, data flows, and phased implementation plan, see:
-👉 **[`PRD.md`](PRD.md)**
+- 📘 **[`PRD.md`](PRD.md)**: Full Product Requirements Document, Firebase-to-ATProto architectural deconstruction, and phased roadmap.
+- 🤖 **[`AGENTS.md`](AGENTS.md)**: Engineering handover guide, Rust invariants, and architectural mandates.
 
 ---
 

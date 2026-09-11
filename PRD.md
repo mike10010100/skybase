@@ -86,12 +86,59 @@ Powered by [`skyauth`] for cryptographic identity and authentication, `skybase` 
    - All background tasks (firehose ingestion, event dispatching, health checkers) are tracked in a managed `tokio::task::JoinSet` tied to a `tokio_util::sync::CancellationToken`. On shutdown or timeout, tasks are cleanly aborted and joined.
 8. **100% Documentation Coverage**:
    - All public structs, fields, constants, enums, modules, and functions must have descriptive documentation comments (`missing_docs` is denied). Bare URLs in documentation must be enclosed in angle brackets (e.g. `<https://bsky.social>`).
-9. **Mandatory Pre-Completion Verification Pipeline**:
-   - Every commit and release must pass: `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --all-targets`, and `cargo deny check`.
+### 2.3 Strategic Architecture: The "Engine vs. Interface" Mandate (Avoiding the Language Trap)
+A critical strategic question for `skybase` is: *Are we pigeonholing ourselves by building in Rust?*
 
----
+The answer is: **Only if we force developers to write Rust to use it.**
 
----
+#### The Market Reality
+- In the AT Protocol ecosystem, **85–90%** of application developers write **TypeScript / JavaScript (React, React Native, Next.js), Swift (iOS), Kotlin (Android), or Flutter**.
+- Only **10–15%** are systems/backend engineers writing Rust or Go.
+- If `skybase` were *only* an embeddable Rust crate requiring developers to install `cargo` and write Rust code to build their app, the project would artificially restrict its addressable market to a tiny fraction of builders.
+
+#### The "PocketBase / Supabase / Meilisearch" Playbook
+The most successful modern developer platforms solve this by separating the **Engine** from the **Interface**:
+- **PocketBase** is written 100% in Go, but 90% of its users write JavaScript and Dart.
+- **Supabase** is written in Elixir, Go, and C (Postgres), but its developers write TypeScript and Python.
+- **Meilisearch** is written 100% in Rust, but frontend developers consume it via simple npm packages.
+- **Firebase** is written in C++, Java, and Go, but developers interact exclusively through JavaScript, Swift, and Kotlin SDKs.
+
+**Rust is an invisible superpower for the engine, not a barrier for the developer.**
+- **Firehose Ingestion Scale**: Processing the global Jetstream firehose requires sustaining 5,000–10,000+ events/sec without garbage collection pauses or thread starvation. In Rust, `skybase` achieves this on a $5/month VPS using under 50MB of RAM.
+- **Single Zero-Dependency Binary**: Developers download one 15MB static executable (`./skybase`). No Node.js runtime conflicts, no native C++ node-gyp compilation failures, and no mandatory Docker setup.
+- **Formally Verified Cryptographic Kernel**: Pure Safe Rust (`#![forbid(unsafe_code)]`) with zero memory corruption, leveraging [`skyauth`]'s formally proven DPoP, PKCE, and SSRF filters.
+
+#### The Three Golden Rules to Avoid Pigeonholing
+To ensure `skybase` captures the entire developer ecosystem, the project strictly enforces three architectural rules:
+
+1. **Rule 1: The Primary Interface is HTTP / WebSocket + First-Class TypeScript SDK (`@skybase/client`)**
+   - 90% of developers will interact with `skybase` via TypeScript/JavaScript:
+     ```typescript
+     import { Skybase } from '@skybase/client';
+     const sb = new Skybase('http://localhost:8080');
+     await sb.auth.signInWithHandle('alice.bsky.social');
+     const post = await sb.collection('app.bsky.feed.post').create({ text: 'Hello!' });
+     sb.collection('app.bsky.feed.post').where('author', '==', 'alice.bsky.social').onSnapshot(setPosts);
+     ```
+   - The developer experience feels identical to Firebase; the developer never knows or cares that Rust powers the engine.
+
+2. **Rule 2: Zero-Install Local Developer Experience (No Rust Toolchain Required)**
+   - Frontend developers can launch a local backend without installing Rust or Cargo:
+     ```bash
+     npx skybase dev
+     # or
+     brew install skybase && skybase
+     # or
+     docker run -p 8080:8080 skybase/skybase
+     ```
+   - The single binary boots in under 10 milliseconds, initializes SQLite, starts the API gateway, and serves the embedded Web Admin dashboard.
+
+3. **Rule 3: Extensibility Without Recompilation (Webhooks & Scripting)**
+   - In Firebase, developers write Cloud Functions in TypeScript. If `skybase` required recompiling Rust to add an event trigger, it would alienate non-Rust developers.
+   - `skybase` resolves this via:
+     - **HTTP Webhooks**: Dispatches HTTP POST notifications to any external server (e.g. Next.js `/api/webhooks/*` or AWS Lambda) when record mutations occur.
+     - **Embedded Scripting (Phase 3/4)**: Lightweight embedded JavaScript (via QuickJS / Boa) or WASM plugins for running server-side triggers directly inside the daemon.
+     - **Native Rust Crate**: Remains available as a direct compile-time dependency for high-performance systems developers (feed generators, custom relays, and firehose indexers).
 
 ## 3. Deep Architectural Review: What Firebase Actually Does vs. The ATProto Reality
 

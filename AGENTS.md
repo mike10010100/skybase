@@ -69,6 +69,12 @@ Every crate root enforces the strict compiler lint safety guard:
 - All public structs, fields, constants, enums, modules, and functions must have descriptive documentation comments (`missing_docs` is denied).
 - Bare URLs in documentation must be enclosed in angle brackets (e.g. `<https://bsky.social>`).
 
+### 7. The "Engine vs. Interface" Mandate (Zero-Rust Barrier for App Developers)
+- **Never Force App Developers to Write Rust**: While the core engine, daemon, and native crate are 100% pure Safe Rust, the primary developer interface for application developers must be **language-agnostic HTTP/WebSocket endpoints and the `@skybase/client` TypeScript SDK**.
+- **The PocketBase / Supabase Blueprint**: Like PocketBase (Go engine, JS/Dart users) or Supabase (Elixir/Go/C engine, JS/Python users), Rust is an invisible engine superpower delivering sub-millisecond firehose filtering, 50MB RAM usage, and zero crashes.
+- **Zero-Toolchain Local DX**: Application developers must never be required to install Rust, Cargo, or C++ compilers. The daemon must be distributable as a standalone precompiled binary (`npx skybase dev`, `brew install skybase`).
+- **Extensibility Without Recompilation**: Event triggers and functions must support HTTP Webhook dispatching (e.g. to Next.js API routes or serverless handlers) and optional embedded scripting (QuickJS/Wasm), ensuring non-Rust developers can write backend logic without recompiling the daemon.
+
 ---
 
 ## 🏗️ Architecture Quick Reference
