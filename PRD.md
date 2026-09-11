@@ -47,13 +47,47 @@ Powered by [`skyauth`] for cryptographic identity and authentication, `skybase` 
 
 ## 2. Core Vision & Design Principles
 
-### 2.1 Non-Negotiable Invariants
-1. **User Sovereignty First**: `skybase` never takes custodial ownership of user data. All records are written directly to the user's sovereign PDS repository. The local `skybase-index` is an ephemeral, rebuildable read projection (AppView), never a custodial walled garden.
-2. **Zero Unsafe Code (`#![forbid(unsafe_code)]`)**: 100% pure Safe Rust enforced across the crate root and all sub-modules. No `unsafe` blocks, zero production panics, and strict compiler lints.
-3. **Zero Production Panics & Strongly Typed Errors**: Deny `.unwrap()`, `.expect()`, `panic!`, `todo!`, and `unimplemented!` in production paths. All fallible operations return strongly typed `Result<T, SkybaseError>`.
-4. **Sub-Millisecond Firehose Filtering**: Highly optimized Jetstream ingestion engine that subscribes only to the collection NSIDs and DIDs required by the application, minimizing memory, bandwidth, and CPU footprint.
-5. **Drift-Free Scheduling & Clock-Warp Safety**: Periodic tasks (cursor commits, cache evictions, token renewals) use monotonic, saturating intervals to prevent drift or hangs during NTP jumps or VM suspensions.
-6. **Dual Deployment Modes**: Can be imported as an embedded Rust library within an existing service (Axum, Actix, Tower) OR deployed as a standalone zero-config daemon exposing REST and WebSocket endpoints.
+### 2.1 Reference Blueprint & Standards
+`skybase` is designed and implemented following the **Production-Grade Rust Best Practices & Architecture Standards** defined in the reference repository:
+- **Reference Repo**: [`rust-best-practices`](/Users/mike10010100/git/rust-best-practices)
+- **Architecture Guide**: [`BEST_PRACTICES.md`](/Users/mike10010100/git/rust-best-practices/BEST_PRACTICES.md)
+- **Tooling Blueprint**: [`TOOLING.md`](/Users/mike10010100/git/rust-best-practices/TOOLING.md)
+- **Agent Blueprint**: [`agents.md`](/Users/mike10010100/git/rust-best-practices/agents.md)
+- **Sibling Ecosystem**: [`skyauth`](../skyauth) and [`for-your-consideration`](../for-your-consideration)
+
+### 2.2 Core Non-Negotiable Invariants
+1. **100% Pure Safe Rust (`#![forbid(unsafe_code)]`)**:
+   - Zero `unsafe` blocks in crate roots ([`src/lib.rs`](src/lib.rs)) or sub-modules. No dependencies that circumvent compiler safety guarantees.
+2. **Strict Crate-Root Safety Guard**:
+   - Enforced compiler lints:
+     ```rust
+     #![deny(
+         clippy::all,
+         clippy::unwrap_used,     // Deny unwrap(), force explicit error handling
+         clippy::expect_used,     // Deny expect(), force structured errors
+         clippy::panic,           // Deny panic!, force error bubbling
+         clippy::todo,            // Deny todo! placeholders in production
+         clippy::unimplemented,   // Deny unimplemented! macros
+         missing_docs,            // Enforce public API documentation
+         rust_2018_idioms         // Use modern Rust idioms
+     )]
+     ```
+3. **Zero Production Panics & Typed Errors**:
+   - Deny `.unwrap()`, `.expect()`, `panic!`, `todo!`, and `unimplemented!` in production paths. All fallible operations return strongly typed `Result<T, SkybaseError>` using variants in [`src/error.rs`](src/error.rs).
+4. **User Sovereignty by Default**:
+   - `skybase` never takes custodial ownership of user data. All records are written directly to the user's sovereign PDS repository. The local `skybase-index` is an ephemeral, rebuildable read projection (AppView), never a custodial walled garden.
+5. **Defensive Concurrency & 64-Shard Partitioning**:
+   - High-concurrency state structures (session caches, subscription tables, memory indexes) use **64 independent `RwLock` shards** to eliminate lock contention under multi-threaded load.
+   - **Never Hold Locks Across `.await` Points**: Synchronous mutex or `RwLock` guards must always be dropped before executing any `.await`, `sleep()`, or network I/O.
+6. **Clock-Warp Safety & Drift-Free Scheduling**:
+   - Elapsed time is always computed using `now.saturating_duration_since(earlier)` or `.map_or(0, ...)` to guarantee resilience against backwards monotonic clock jumps during VM migrations or NTP syncs.
+   - Recurring tasks (Jetstream cursor commits, cache evictions, token renewals) must calculate next runs relative to the previous anchor timestamp or use `tokio::time::interval`, not relative `Instant::now() + delay`.
+7. **Task Leak Prevention & Managed Cancellation**:
+   - All background tasks (firehose ingestion, event dispatching, health checkers) are tracked in a managed `tokio::task::JoinSet` tied to a `tokio_util::sync::CancellationToken`. On shutdown or timeout, tasks are cleanly aborted and joined.
+8. **100% Documentation Coverage**:
+   - All public structs, fields, constants, enums, modules, and functions must have descriptive documentation comments (`missing_docs` is denied). Bare URLs in documentation must be enclosed in angle brackets (e.g. `<https://bsky.social>`).
+9. **Mandatory Pre-Completion Verification Pipeline**:
+   - Every commit and release must pass: `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --all-targets`, and `cargo deny check`.
 
 ---
 
