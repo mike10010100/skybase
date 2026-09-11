@@ -77,6 +77,13 @@ impl Skybase {
     /// # Errors
     /// Returns [`SkybaseError::Config`] or [`SkybaseError::Auth`] if client metadata is invalid.
     pub fn new(config: SkybaseConfig) -> Result<Self> {
+        if config.client_id.trim().is_empty() {
+            return Err(SkybaseError::Config("client_id cannot be empty".into()));
+        }
+        if config.redirect_uri.trim().is_empty() {
+            return Err(SkybaseError::Config("redirect_uri cannot be empty".into()));
+        }
+
         let metadata =
             skyauth::client::OAuthClientMetadata::new(&config.client_id, &config.redirect_uri)
                 .with_client_name(&config.app_name);
@@ -120,5 +127,12 @@ mod tests {
 
         let skybase = Skybase::new(config).expect("Skybase should initialize successfully");
         assert_eq!(skybase.config().app_name, "Test App");
+    }
+
+    #[test]
+    fn test_skybase_config_validation() {
+        let invalid_config = SkybaseConfig::new("", "https://app.example.com/callback", "App");
+        let result = Skybase::new(invalid_config);
+        assert!(matches!(result, Err(SkybaseError::Config(_))));
     }
 }

@@ -34,7 +34,7 @@
 | **Local Emulator / Admin** | `skybase-server` | Single-binary daemon with embedded SQLite & Admin UI |
 | **Client SDKs** | `skybase-sdk` | Rust crate + `@skybase/client` for TypeScript / React |
 
----
+> **Architecture Note**: While adopting Firebase's beloved developer ergonomics (one-liner auth, collection queries, `.onSnapshot()`), `skybase` is an **eventually-consistent Micro-AppView backend**, honoring ATProto's sovereign PDS repository writes and asynchronous firehose replication.
 
 ---
 
@@ -44,7 +44,7 @@
 > **Only if we force developers to write Rust to use it.**
 
 `skybase` follows the architecture of **PocketBase** (Go engine, JS/Dart users), **Supabase** (Elixir/C engine, JS/Python users), and **Meilisearch** (Rust engine, npm users):
-- **Rust is an invisible superpower for the engine**: It processes the global Jetstream firehose at >10,000 events/sec, runs on a $5/mo VPS using <50MB RAM, provides zero-crash safety (`#![forbid(unsafe_code)]`), and packages into a single 15MB zero-dependency binary.
+- **Rust is an invisible superpower for the engine**: Designed to sustain thousands of events/sec over the Jetstream firehose without GC pauses, operate within compact memory budgets, provide zero-crash safety (`#![forbid(unsafe_code)]`), and package into a single zero-dependency binary.
 - **The developer interface is 100% language-agnostic**: Frontend and mobile developers interact exclusively via HTTP, WebSockets, and the first-class `@skybase/client` TypeScript / React SDK. You never need to install Rust or Cargo to build apps on `skybase`.
 
 ---

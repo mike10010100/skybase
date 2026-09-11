@@ -104,8 +104,8 @@ The most successful modern developer platforms solve this by separating the **En
 - **Firebase** is written in C++, Java, and Go, but developers interact exclusively through JavaScript, Swift, and Kotlin SDKs.
 
 **Rust is an invisible superpower for the engine, not a barrier for the developer.**
-- **Firehose Ingestion Scale**: Processing the global Jetstream firehose requires sustaining 5,000–10,000+ events/sec without garbage collection pauses or thread starvation. In Rust, `skybase` achieves this on a $5/month VPS using under 50MB of RAM.
-- **Single Zero-Dependency Binary**: Developers download one 15MB static executable (`./skybase`). No Node.js runtime conflicts, no native C++ node-gyp compilation failures, and no mandatory Docker setup.
+- **Firehose Ingestion Scale**: Processing the global Jetstream firehose requires sustaining thousands of events per second without garbage collection pauses or thread starvation. Rust enables `skybase` to achieve this with minimal CPU overhead and compact memory usage on modest cloud instances. (*Design targets: >5,000 events/sec sustained throughput, <100MB idle RAM, sub-50ms daemon boot time; to be formally benchmarked via automated Criterion suites in Phase 1.5*).
+- **Single Zero-Dependency Binary**: Developers download one static executable (`./skybase`, target size ~15–20MB). No Node.js runtime conflicts, no native C++ node-gyp compilation failures, and no mandatory Docker setup.
 - **Formally Verified Cryptographic Kernel**: Pure Safe Rust (`#![forbid(unsafe_code)]`) with zero memory corruption, leveraging [`skyauth`]'s formally proven DPoP, PKCE, and SSRF filters.
 
 #### The Three Golden Rules to Avoid Pigeonholing
@@ -125,22 +125,27 @@ To ensure `skybase` captures the entire developer ecosystem, the project strictl
 2. **Rule 2: Zero-Install Local Developer Experience (No Rust Toolchain Required)**
    - Frontend developers can launch a local backend without installing Rust or Cargo:
      ```bash
-     npx skybase dev
+     npx skybase dev    # Target distribution via npm binary wrapper (Phase 5)
      # or
      brew install skybase && skybase
      # or
      docker run -p 8080:8080 skybase/skybase
      ```
-   - The single binary boots in under 10 milliseconds, initializes SQLite, starts the API gateway, and serves the embedded Web Admin dashboard.
+   - The single binary boots in milliseconds, initializes SQLite, starts the API gateway, and serves the embedded Web Admin dashboard.
 
 3. **Rule 3: Extensibility Without Recompilation (Webhooks & Scripting)**
    - In Firebase, developers write Cloud Functions in TypeScript. If `skybase` required recompiling Rust to add an event trigger, it would alienate non-Rust developers.
    - `skybase` resolves this via:
      - **HTTP Webhooks**: Dispatches HTTP POST notifications to any external server (e.g. Next.js `/api/webhooks/*` or AWS Lambda) when record mutations occur.
-     - **Embedded Scripting (Phase 3/4)**: Lightweight embedded JavaScript (via QuickJS / Boa) or WASM plugins for running server-side triggers directly inside the daemon.
+     - **Embedded Scripting [Post-v1 Extension]**: Lightweight embedded JavaScript (via QuickJS / Boa) or WASM plugins for running server-side triggers directly inside the daemon.
      - **Native Rust Crate**: Remains available as a direct compile-time dependency for high-performance systems developers (feed generators, custom relays, and firehose indexers).
 
+---
+
 ## 3. Deep Architectural Review: What Firebase Actually Does vs. The ATProto Reality
+
+> **Positioning Note: "Micro-AppView Backend", Not a Literal Firestore Clone**
+> While `skybase` adopts Firebase's beloved developer experience (one-liner auth, collection/document queries, `.onSnapshot()`), ATProto is fundamentally an **eventually-consistent, decentralized protocol**. In Firestore, writes are immediately globally consistent in Google's cloud. In ATProto, writes are sovereign to the user's PDS, then asynchronously broadcast over the network firehose to the AppView. We position `skybase` honestly: an **AppView Backend with Firebase-like developer ergonomics**, not a false promise of immediate multi-user ACID consistency.
 
 To build an authentic "Firebase for the AT Protocol", we must rigorously deconstruct what Firebase does, why developers rely on it, the fundamental architectural conflict posed by decentralized ATProto, and how `skybase` resolves each challenge in pure Safe Rust.
 
@@ -373,9 +378,12 @@ sequenceDiagram
 Built directly on top of [`skyauth`]:
 - **Turn-key Integration**: Wraps `skyauth::client::AtprotoOAuthClient` with higher-level application session lifecycle management.
 - **Session Continuity**: Automatic, transparent DPoP access token refresh before expiration.
-- **Multi-Tenant State Store**: 64-shard partitioned memory store with configurable Redis or SQL backends for distributed cluster deployments.
+- **Token Custody at Rest (Honest Security Boundary)**:
+  - When the daemon acts as a backend client to sign PDS writes on users' behalf, it holds sensitive DPoP private keys and refresh tokens.
+  - To prevent overselling "sovereignty": while the *data records* remain sovereign on user PDSs, the daemon's *access tokens at rest* are encrypted using **AES-256-GCM** with an application master key (`SKYBASE_MASTER_KEY`).
+  - In-memory session keys implement `zeroize::Zeroize` on drop.
+- **Multi-Tenant State Store**: 64-shard partitioned memory store for zero-lock contention under concurrency; external Redis / SQL backends marked as `[Post-v1 Extension]`.
 - **Framework Middleware**: Ready-to-use extractors and guards for Axum 0.7, Actix-Web 4, and Tower services.
-- **Zeroization**: Cryptographic keys and sensitive session tokens are securely scrubbed from memory on drop via `zeroize`.
 
 ### 6.2 `skybase-repo`: Sovereign Repository Engine
 - **Direct Sovereign Writes**: Issues XRPC calls directly to the user's authoritative PDS using DPoP-signed credentials.
@@ -386,6 +394,33 @@ Built directly on top of [`skyauth`]:
 ### 6.3 `skybase-index`: Embedded Micro-AppView
 - **Targeted Jetstream Ingestion**: Connects to Bluesky Jetstream (`wss://jetstream1.us-east.bsky.network/subscribe`) requesting only the collection NSIDs used by the application.
 - **Zero-Waste Filter**: Drastically reduces network ingress and memory usage compared to consuming the entire uncompressed raw firehose.
+- **Jetstream Backfill & Cold-Start Recovery**:
+  - *The Gap*: Jetstream retention is short (~hours to days). On a cold start or extended downtime, cursor persistence alone cannot prevent record drops.
+  - *The Solution*: Dual-mode synchronization:
+    1. **Catch-up Phase**: If the stored cursor is older than Jetstream's replay window (or on cold start for a historical collection), `skybase-index` uses `com.atproto.sync.getRepo` (or CAR export) to backfill records directly from PDS repositories.
+    2. **Real-Time Phase**: Once synced up to the current sequence, the engine seamlessly hands off to the live Jetstream WebSocket stream.
+- **Lexicon → SQLite Schema Mapping Strategy**:
+  - *The Problem*: Arbitrary lexicon fields cannot be mapped using chaotic runtime dynamic DDL (`ALTER TABLE`) without schema corruption and index fragmentation.
+  - *The Solution: Canonical Envelope + JSON1 Virtual Columns + FTS5*:
+    - **Canonical Table (`records`)**:
+      ```sql
+      CREATE TABLE records (
+          did TEXT NOT NULL,
+          collection TEXT NOT NULL,
+          rkey TEXT NOT NULL,
+          cid TEXT NOT NULL,
+          rev TEXT,
+          payload TEXT NOT NULL, -- Exact JSON representation of the Lexicon record
+          created_at INTEGER NOT NULL,
+          indexed_at INTEGER NOT NULL,
+          PRIMARY KEY (did, collection, rkey)
+      );
+      ```
+    - **Generated Virtual Indexes**: When an application registers a lexicon, `skybase` creates deterministic secondary indexes over extracted JSON fields using SQLite JSON1:
+      ```sql
+      CREATE INDEX idx_records_rating ON records(collection, json_extract(payload, '$.rating'));
+      ```
+    - **Full-Text Search**: An SQLite FTS5 contentless/external-content table is automatically created to index string fields with BM25 ranking.
 - **Embedded Storage**: High-performance SQLite engine configured with Write-Ahead Logging (`PRAGMA journal_mode=WAL`), memory-mapped I/O (`PRAGMA mmap_size`), and synchronous normal mode for concurrent readers and sub-millisecond writes.
 - **Expressive Query Builder**:
   ```rust
@@ -397,8 +432,7 @@ Built directly on top of [`skyauth`]:
       .execute::<PostRecord>()
       .await?;
   ```
-- **Full-Text Search**: Built-in SQLite FTS5 extension indexing textual content with BM25 ranking.
-- **Pluggable SQL Backend**: Optional PostgreSQL backend support for high-throughput enterprise deployments.
+- **Pluggable Enterprise Backend [Post-v1 Extension]**: Optional PostgreSQL backend support for multi-node deployments.
 
 ### 6.4 `skybase-events`: Reactive Trigger Pipeline
 - **Declarative Event Hooks**:
@@ -632,12 +666,19 @@ const unsubscribe = skybase.collection('app.bsky.feed.post')
 - [ ] Implement `skybase-repo` XRPC client (`createRecord`, `putRecord`, `deleteRecord`).
 - [ ] Comprehensive unit and mock integration test suites.
 
-### Phase 2: Jetstream Ingestion & Micro-AppView Engine (Weeks 4–6)
-- [ ] Build `skybase-events` Jetstream WebSocket subscriber with collection filtering.
+### Phase 1.5: The Thin Vertical Slice (De-Risking the Core Thesis)
+> *Priority Objective: Rather than building 8 pillars wide, cut a complete end-to-end slice across one single collection (`app.bsky.feed.post` or custom test NSID). Prove the dual-path thesis with running code and hermetic integration tests before expanding.*
+- [ ] Implement canonical SQLite `records` table with JSON1 extraction and FTS5 search.
+- [ ] Build minimal Jetstream WebSocket consumer filtering for the single target collection.
+- [ ] Build minimal `createRecord` client using `skyauth` DPoP signing.
+- [ ] Execute hermetic integration test:
+  $$\text{DPoP Login} \longrightarrow \text{createRecord (PDS)} \longrightarrow \text{Jetstream Ingest} \longrightarrow \text{SQLite Upsert} \longrightarrow \text{.where().limit() Query} \longrightarrow \text{onSnapshot Event}$$
+- [ ] Measure and record empirical baseline benchmarks (ingest throughput, memory usage, query latency) with Criterion.
+
+### Phase 2: Production Ingestion & Micro-AppView Engine (Weeks 4–6)
+- [ ] Implement historical backfill crawler (`com.atproto.sync.getRepo` / CAR sync) for cold starts.
 - [ ] Implement monotonic cursor tracking with disk persistence.
-- [ ] Build `skybase-index` embedded SQLite engine with WAL mode and dynamic table schema creation.
-- [ ] Implement fluent query builder (filtering, sorting, pagination, FTS5 search).
-- [ ] End-to-end ingestion and query performance benchmarks (>5,000 events/sec).
+- [ ] Generalize fluent query builder for arbitrary Lexicons.
 
 ### Phase 3: Blob Storage & Reactive Trigger Pipeline (Weeks 7–8)
 - [ ] Implement `skybase-storage` PDS blob upload with SHA-256 CID computation.
