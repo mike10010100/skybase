@@ -32,7 +32,15 @@ Currently, developers wanting to build an application on ATProto face a massive 
   ...they hit a brick wall. A client cannot query 10,000 independent remote PDSs in real time. **Every developer is forced to build their own firehose consumer, backfill pipeline, database schema, and query API.** This undifferentiated heavy lifting is where almost all ATProto app attempts die.
 
 As highlighted in the Bluesky ecosystem discussion between developers:
-> *"the highest-leverage thing we can do to grow atproto right now is make it easier for devs to build apps on... 'firebase for atproto' is a good target."*
+> **garrison (`@garrison.corporate.fm`)**:
+> *"the highest-leverage thing we can do to grow atproto right now is make it easier for devs to build apps on... 'firebase for atproto' is a good target... hosted components plus a friendlier database api, like firebase tried to be."*
+>
+> **Bailey Townsend (`@pds.dad`)**:
+> *"Ah yes, an open source token mediated backend so oauth sessions can last longer than 2 weeks and devs can host their projects on wisp, tangled, or github pages."*
+
+This exchange pinpoints the two exact unserved requirements in the ATProto developer journey:
+1. **The "Friendlier Database API" + Hosted Ingestion**: A query layer that abstracts away the low-level firehose, CBOR/MST parsing, and CAR sync into clean, collection-oriented `.where().orderBy().limit()` and `.onSnapshot()` primitives.
+2. **The Token-Mediated Backend for Static Sites**: A session proxy allowing frontend developers hosting static apps on GitHub Pages, Wisp, or Tangled to maintain persistent OAuth sessions (>2 weeks) without browser storage eviction killing user logins.
 
 ### 1.3 The Strategic Wedge: The Turn-Key Micro-AppView Engine
 Rather than attempting to boil the ocean by shipping 8 disparate pillars at once, `skybase` enters the market with a **razor-sharp wedge**:
@@ -164,6 +172,33 @@ To ensure `skybase` captures the entire developer ecosystem, the project strictl
      - **Embedded Scripting [Post-v1 Extension]**: Lightweight embedded JavaScript (via QuickJS / Boa) or WASM plugins for running server-side triggers directly inside the daemon.
      - **Native Rust Crate**: Remains available as a direct compile-time dependency for high-performance systems developers (feed generators, custom relays, and firehose indexers).
 
+### 2.4 The Deployment Spectrum: Answering the "Hosted Components" Need
+As noted in the developer community discussion (*"hosted components plus a friendlier database api, like firebase tried to be"*), the ultimate barrier for frontend developers is often **infrastructure management**. If building an ATProto app requires managing long-running WebSocket daemons, disk WALs, and database backups on a private server, most frontend builders walk away.
+
+`skybase` resolves this via a three-tier **Deployment Spectrum**:
+
+```text
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                               THE DEPLOYMENT SPECTRUM                                  │
+├──────────────────────┬─────────────────────────┬───────────────────────────────────────┤
+│ Tier                 │ Target Audience         │ What Runs Where                       │
+├──────────────────────┼─────────────────────────┼───────────────────────────────────────┤
+│ Level 0: Local Dev   │ Development / Offline   │ `npx skybase dev` runs on localhost;  │
+│                      │                         │ embedded SQLite + mock Jetstream      │
+├──────────────────────┼─────────────────────────┼───────────────────────────────────────┤
+│ Level 1: 1-Click     │ Independent builders,   │ Single binary on Fly.io / Railway /   │
+│ Self-Hosted          │ open-source projects    │ VPS ($4/mo); 1-click config templates │
+├──────────────────────┼─────────────────────────┼───────────────────────────────────────┤
+│ Level 2: Managed     │ Static frontend apps    │ Multi-tenant hosted Micro-AppView     │
+│ "Skybase Cloud"      │ (GitHub Pages, Tangled, │ cloud; developers register NSIDs and  │
+│ [Strategic Roadmap]  │ Wisp, Vercel, Netlify)  │ get instant managed API endpoints     │
+└──────────────────────┴─────────────────────────┴───────────────────────────────────────┘
+```
+
+1. **Level 0: Local Sandbox (`npx skybase dev`)**: Zero-install local daemon with mock Jetstream replay mode and embedded Web Admin.
+2. **Level 1: 1-Click Self-Hosted Micro-AppView**: First-class `fly.toml` and `railway.json` templates that launch the static binary with persistent SQLite volume in 60 seconds. Zero database administration.
+3. **Level 2: Managed Cloud ("Skybase Cloud" Roadmap)**: A hosted multi-tenant Micro-AppView service (Supabase Cloud style) where developers building on static hosts (GitHub Pages, Tangled, Wisp) simply paste their collection NSIDs and get an instant production query endpoint and session mediator without provisioning any compute.
+
 ---
 
 ## 3. Deep Architectural Review: What Firebase Actually Does vs. The ATProto Reality
@@ -192,9 +227,9 @@ To build an authentic "Firebase for the AT Protocol", we must rigorously deconst
 * **What Firebase Does**: Manages user accounts, passwords, phone/SMS OTP, social logins (Google, Apple, GitHub), anonymous sessions, and issues signed JWT ID tokens with automatic background refresh.
 * **Why Developers Rely on It**: Eliminates the danger and complexity of password hashing, salt storage, OAuth 2.0 PKCE redirection flows, and session validation.
 * **The ATProto Conflict**: In Web2, user credentials and identity records live in Google's cloud database. In ATProto, **users possess sovereign decentralized identifiers** (`did:plc`, `did:web`). Authentication must not be custodial; apps must support decentralized **OAuth 2.1 with RFC 9449 DPoP (proof-of-possession binding tokens to ephemeral client keys)**, RFC 9126 PAR, and bidirectional handle resolution (`alsoKnownAs`).
-* **The `skybase` Solution: Two Clear Topologies & The Zero-Custody Boundary**:
-  To resolve the fundamental tension between developer convenience and user sovereignty, `skybase` explicitly delineates two operating models:
-  1. **Topology A: Client-Sovereign (Browser/Mobile) — Zero Skybase Custody (Default for 95% of Apps)**:
+* **The `skybase` Solution: Three Operating Topologies & The Custody Boundary**:
+  To resolve the fundamental tension between developer convenience and user sovereignty, `skybase` explicitly delineates three operating models:
+  1. **Topology A: Client-Sovereign (Browser/Mobile) — Zero Skybase Custody (Default for 90% of Apps)**:
      - The user authenticates directly with their personal PDS from the client application using `@atproto/oauth-client-browser` or mobile keystores.
      - Ephemeral DPoP private keys and refresh tokens remain strictly on the client device (IndexedDB / iOS Keychain / Android Keystore).
      - The client submits writes directly to their personal PDS.
@@ -205,17 +240,38 @@ To build an authentic "Firebase for the AT Protocol", we must rigorously deconst
      - *Honest Custody Boundary*: In this mode, the server **is** an OAuth credential custodian.
      - To protect against database exfiltration, all tokens and private keys stored at rest are encrypted using **AES-256-GCM** with a master secret (`SKYBASE_MASTER_KEY`).
      - Ephemeral session keys implement `zeroize::Zeroize` on drop and are sharded across 64 lock-free `RwLock` partitions.
+  3. **Topology C: Token-Mediated Backend for Static Sites (The "GitHub Pages / Tangled / Wisp" Solution)**:
+     - *The Problem (identified by Bailey Townsend)*: Static single-page applications hosted on GitHub Pages, Wisp, or Tangled lack a backend and must rely on public-client OAuth. Browser storage clearing and strict public-client refresh token rotation cause user sessions to expire after ~2 weeks of inactivity, forcing repetitive re-authentication.
+     - *The Solution*: `skybase` acts as a **Token-Mediated Confidential OAuth Session Proxy**. The static frontend delegates the initial OAuth flow to a lightweight Skybase daemon (or managed instance). Skybase secures the confidential DPoP session and rotates refresh tokens continuously in the background, issuing a long-lived, scoped session token to the static site. Users remain authenticated for months without session drop.
 
-### 3.2 Pillar 2: Data Storage & Compound Indexing (Cloud Firestore)
+### 3.2 Pillar 2: Data Storage & Compound Indexing (Cloud Firestore) — "The Friendlier Database API"
 * **What Firebase Does**: A hierarchical NoSQL document store (Collections $\rightarrow$ Documents). Provides sub-second compound queries (`.where("tag", "==", "rust").where("rating", ">=", 4).orderBy("created_at", "desc").limit(20)`) and automated index management.
 * **Why Developers Rely on It**: Fast, schemaless development with zero SQL schema migration overhead.
 * **The ATProto Conflict (The Sovereignty vs. Aggregation Paradox)**:
   - In Firebase, all users write to one centralized database hosted by the developer.
   - In ATProto, **users own their data in their personal PDS repository (an MST)**. If 50,000 users use an app, their records live on 50,000 different PDS instances.
   - An app *cannot* query 50,000 remote PDS instances in real time to render an aggregated feed, comments list, or search index.
-* **The `skybase` Solution (`skybase-repo` + `skybase-index`)**: Resolves the paradox with a **Dual-Path Engine**:
+  - Furthermore, ATProto primitives (CAR export files, Merkle Search Trees, DAG-CBOR records, Jetstream byte sequences) are deeply intimidating to product developers.
+* **The `skybase` Solution: Dual-Path Engine + Friendlier Database API**:
+  `skybase` directly fulfills garrison's target (*"a friendlier database api, like firebase tried to be"*):
   - **Sovereign Write Path**: Client writes are signed with DPoP and submitted via XRPC (`com.atproto.repo.createRecord`) directly to the user's personal PDS. The user retains complete custody of their data.
   - **Aggregated Read Path (`skybase-index`)**: An embedded **Micro-AppView** connects to the global Jetstream firehose, filters exclusively for the app's collection NSIDs (e.g. `com.myapp.review`), and replicates commits into an embedded SQLite WAL database with full-text search (FTS5) and compound secondary indexes.
+  - **The Declarative Query API**: Developers never write raw SQL, manage Jetstream sockets, or unpack CBOR. They query collections with expressive, idiomatic ergonomics:
+    ```typescript
+    // Multi-user filtered & sorted query across all ATProto users
+    const topReviews = await skybase.collection('com.example.book.review')
+      .where('rating', '>=', 4)
+      .where('genre', '==', 'cyberpunk')
+      .orderBy('createdAt', 'desc')
+      .limit(25)
+      .get();
+
+    // Instant full-text search with BM25 ranking
+    const searchResults = await skybase.collection('com.example.book.review')
+      .search('Snow Crash Hiro Protagonist')
+      .limit(10)
+      .get();
+    ```
 
 ### 3.3 Pillar 3: Real-Time Push Synchronization (`onSnapshot`) & The Eventual Consistency UX
 * **What Firebase Does**: Keeps client state synchronized in real time via persistent WebSockets. Whenever a document or query result changes, Firebase computes the diff and pushes updates immediately to all listening clients without polling.
@@ -293,15 +349,16 @@ To prevent "schedule fantasy" while maintaining uncompromising Rust safety invar
 | **Embedded Micro-AppView** | `skybase-index` | Targeted Jetstream ingestion for configured NSIDs; embedded SQLite WAL with canonical `records` table; JSON1 virtual indexes; FTS5 full-text search; sub-millisecond multi-user queries. |
 | **Historical PDS Backfill** | `skybase-index` | Cold-start & downtime recovery via `com.atproto.sync.getRepo` CAR sync before seamless handoff to live Jetstream stream. |
 | **Live Real-Time Queries** | `skybase-events` | WebSocket live-query streaming (`/api/v1/realtime`) with push updates on record commits, updates, and deletes. |
-| **Local Dev Sandbox** | `skybase-server` | Single static binary (`./skybase dev`) with embedded SQLite; `--mock` mode providing offline synthetic Jetstream event replay. |
+| **Local Dev Sandbox & 1-Click Deploy** | `skybase-server` | Single static binary (`./skybase dev`) with embedded SQLite; `--mock` mode providing offline synthetic Jetstream event replay; pre-configured `fly.toml` & `railway.json` templates for 60-second cloud deployment. |
 | **Web Admin Console** | `skybase-server` | Embedded SPA (`rust-embed`) at `/_/admin` for live collection inspection, query benchmarking, and stream health. |
 | **Zero-Custody Client SDK** | `@skybase/client` | TypeScript SDK linking browser-side `@atproto/oauth-client-browser` writes directly to PDS with `skybase` live query subscriptions and optimistic state reconciliation. |
 
 ### 4.2 Tier 2: Backend Automation & Custodial Operations (v0.2)
-*For backend daemons, automated bots, and feed generators that require server-side writes without an active browser session.*
+*For backend daemons, automated bots, and static frontends (GitHub Pages/Wisp/Tangled) requiring persistent session mediation.*
 
 | Component | Target Pillar | Scope & Capabilities in v0.2 |
 | :--- | :--- | :--- |
+| **Token-Mediated Session Proxy** | `skybase-auth` | Confidential OAuth session broker for static SPAs (GitHub Pages, Tangled, Wisp) preventing the 2-week session drop caused by browser storage clearing. |
 | **Server-Side Repo CRUD** | `skybase-repo` | DPoP-signed XRPC calls (`createRecord`, `putRecord`, `deleteRecord`, `applyWrites`) from daemon to PDS. |
 | **Daemon Credential Custody** | `skybase-auth` | Managed OAuth 2.1 lifecycle via `skyauth`; **AES-256-GCM encryption at rest** for refresh tokens; in-memory key zeroization. |
 | **Sovereign Blob Management** | `skybase-storage` | PDS `uploadBlob` client, SHA-256 CID computation, and MIME magic-byte validation. |
@@ -312,6 +369,7 @@ To prevent "schedule fantasy" while maintaining uncompromising Rust safety invar
 
 | Extension | Target Capability | Rationale for Deferral |
 | :--- | :--- | :--- |
+| **Managed "Skybase Cloud"** | Multi-tenant hosted Micro-AppView platform | Hosted multi-tenant service for developers who want zero server management (Supabase Cloud style). |
 | **Enterprise Database** | PostgreSQL backend adapter | SQLite WAL easily scales to millions of records on a single node; premature distributed DB complexity. |
 | **Embedded Scripting Engine** | QuickJS / Boa JS runtime | HTTP webhooks solve external extensibility cleanly without embedding a JS VM inside the Rust daemon. |
 | **Edge CDN Blob Proxy** | Cloudflare R2 / AWS S3 edge cache | Direct PDS blob URLs are sufficient for early stage apps; CDN caching is an optimization, not a blocker. |
@@ -325,10 +383,10 @@ To prevent "schedule fantasy" while maintaining uncompromising Rust safety invar
 
 ```mermaid
 flowchart TD
-    subgraph ClientLayer ["Client Applications (Topology A: Zero Custody)"]
-        BrowserApp["Web Frontend (React / Next.js)"]
-        MobileApp["Mobile App (React Native / Swift)"]
-        BrowserAuth["@atproto/oauth-client-browser<br/>(DPoP Keys in IndexedDB/Enclave)"]
+    subgraph ClientLayer ["Client Applications"]
+        BrowserApp["Web / Mobile App (Topology A: Zero Custody)"]
+        StaticApp["Static Site on GitHub Pages / Wisp / Tangled (Topology C: Mediated)"]
+        BrowserAuth["@atproto/oauth-client-browser<br/>(Ephemeral Keys in IndexedDB)"]
         BrowserApp -.-> BrowserAuth
     end
 
@@ -338,8 +396,9 @@ flowchart TD
         RustDaemon -.-> SkyauthVault
     end
 
-    subgraph SkybaseEngine ["Skybase Micro-AppView Engine (Single Static Binary)"]
+    subgraph SkybaseEngine ["Skybase Micro-AppView Engine (Single Binary or Hosted)"]
         Gateway["REST & WebSocket API Gateway (/api/v1)"]
+        SessionMediator["OAuth Session Mediator (Topology C)<br/>(Persistent >2-Week Sessions)"]
         
         subgraph IngestionPillar ["skybase-index (Micro-AppView Core)"]
             JetstreamSub["Jetstream Firehose Consumer (Filtered NSIDs)"]
@@ -375,6 +434,11 @@ flowchart TD
     BrowserApp -->|5. High-Speed Reads & FTS| Gateway
     Gateway --> QueryEngine
     QueryEngine --> SqliteStore
+
+    %% Topology C (Static Mediated Flow): Session kept alive by Skybase
+    StaticApp -->|OAuth & Session Delegation| SessionMediator
+    SessionMediator -->|PAR & Token Refresh| UserPds
+    StaticApp -->|Live Query & Reads| Gateway
 
     %% Topology B (Server Custodial) Flow: Daemon writes
     RustDaemon --> XrpcClient
@@ -755,6 +819,7 @@ const unsubscribe = skybase.collection('app.bsky.feed.post')
 - [ ] Hermetic local dev sandbox (`./skybase dev --mock`) with synthetic Jetstream event replay.
 - [ ] Axum 0.7 REST and WebSocket live-query gateway (`/api/v1/collections/*`, `/api/v1/realtime`).
 - [ ] Embedded single-binary Web Admin console (`rust-embed`) at `http://localhost:8080/_/admin`.
+- [ ] 1-Click cloud deployment templates (`fly.toml`, `railway.json`, `Dockerfile`) with persistent SQLite WAL volume storage.
 
 ### Phase 3: Zero-Custody Client SDK & Community Feedback Loop
 - [ ] Implement `@skybase/client` TypeScript SDK linking browser-side `@atproto/oauth-client-browser` writes to Skybase live queries.
@@ -764,6 +829,7 @@ const unsubscribe = skybase.collection('app.bsky.feed.post')
 
 ### Phase 4: Backend Automation & Custodial Operations (Tier 2 Expansion)
 - [ ] Implement `skybase-auth` managed session coordinator for autonomous daemons and bots.
+- [ ] Implement **Token-Mediated Session Proxy** for static frontends (GitHub Pages, Tangled, Wisp) to maintain persistent sessions (>2 weeks).
 - [ ] Implement **AES-256-GCM encryption at rest** for daemon-held DPoP refresh tokens (`SKYBASE_MASTER_KEY`).
 - [ ] Implement `skybase-repo` server-side XRPC writes (`createRecord`, `putRecord`, `deleteRecord`, `applyWrites`).
 - [ ] Implement `skybase-storage` PDS blob upload (`uploadBlob`), SHA-256 CID computation, and MIME header validation.
@@ -778,6 +844,7 @@ const unsubscribe = skybase.collection('app.bsky.feed.post')
 - [ ] Documentation site and npm release of `@skybase/client`.
 
 ### Post-v1 Horizon (Tier 3 Extensions)
+- [ ] Multi-tenant managed **"Skybase Cloud"** platform for instant hosted components.
 - [ ] Pluggable PostgreSQL backend adapter for multi-node deployments.
 - [ ] Edge media CDN proxy with Cloudflare R2 / AWS S3 caching.
 - [ ] Embedded lightweight JS/WASM scripting runtime for custom triggers.

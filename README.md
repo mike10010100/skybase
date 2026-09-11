@@ -16,8 +16,8 @@
 - **Hermetic Local Dev Sandbox (`skybase dev --mock`)**: Mock relay and synthetic Jetstream event replay engine allowing you to build and test full-stack ATProto apps offline with zero cloud configuration.
 - **Eventual Consistency with Optimistic UX**: The `@skybase/client` SDK provides deterministic TID tracking and optimistic reconciliation (`isPending`, `isOptimistic`, `isLagging`) so React/Vue components never flicker or drop mutations.
 - **100% Pure Safe Rust**: `#![forbid(unsafe_code)]` enforced crate-wide with 0 `unsafe` blocks, strict clippy denials, and zero production panics.
-- **Turn-Key Server-Side Bot Auth**: When background daemons need to write autonomously, `skybase` integrates [`skyauth`] with **AES-256-GCM encryption at rest** for refresh tokens.
-- **Dual Deployment Modes**: Single prebuilt binary (PocketBase-style) for frontend developers OR embeddable modular Rust crate for high-throughput systems services.
+- **Token-Mediated Sessions for Static Hosting**: Acts as a confidential OAuth session proxy for apps hosted on GitHub Pages, Wisp, or Tangled, keeping user sessions alive indefinitely (>2 weeks) without browser storage eviction.
+- **Dual Deployment Modes**: Single prebuilt binary (`npx skybase dev`) for local development, 1-click cloud deploy (Fly.io / Railway), OR embeddable modular Rust crate for high-throughput systems services.
 
 ---
 
