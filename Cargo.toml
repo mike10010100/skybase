@@ -1,0 +1,53 @@
+[package]
+name = "skybase"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+authors = ["Michael Paulauski <mike10010100@gmail.com>"]
+description = "The Open-Source Backend & Developer Platform for the AT Protocol (Firebase for ATProto, powered by skyauth)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/mike10010100/skybase"
+homepage = "https://github.com/mike10010100/skybase"
+documentation = "https://docs.rs/skybase"
+keywords = ["atproto", "bluesky", "firebase", "backend", "appview"]
+categories = ["web-programming", "database-implementations", "asynchronous"]
+readme = "README.md"
+
+[lib]
+name = "skybase"
+path = "src/lib.rs"
+
+[dependencies]
+# Identity & OAuth 2.1 Engine
+skyauth = { path = "../skyauth", version = "0.3" }
+
+# Concurrency & Async Runtime
+tokio = { version = "1.40", default-features = false, features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
+tokio-util = "0.7"
+parking_lot = "0.12"
+ahash = "0.8"
+async-trait = "0.1"
+
+# Serialization & JSON
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Networking & HTTP
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+url = { version = "2.5", features = ["serde"] }
+
+# Error Handling & Observability
+thiserror = "1.0"
+tracing = "0.1"
+
+# Optional Web Framework & Gateway Server Integrations
+axum = { version = "0.7", optional = true, default-features = false, features = ["json", "query", "tokio"] }
+tower = { version = "0.5", optional = true, default-features = false, features = ["util"] }
+
+[features]
+default = []
+server = ["dep:axum", "dep:tower"]
+full = ["server"]
+
+[dev-dependencies]
+tokio = { version = "1.40", features = ["full", "test-util"] }
