@@ -91,11 +91,104 @@ Powered by [`skyauth`] for cryptographic identity and authentication, `skybase` 
 
 ---
 
-## 3. Scope & Feature Requirements
+---
 
-### 3.1 Feature Matrix: Firebase to `skybase` Mapping
+## 3. Deep Architectural Review: What Firebase Actually Does vs. The ATProto Reality
 
-| Firebase Component | `skybase` Pillar | Underlying ATProto / Standards Mechanism |
+To build an authentic "Firebase for the AT Protocol", we must rigorously deconstruct what Firebase does, why developers rely on it, the fundamental architectural conflict posed by decentralized ATProto, and how `skybase` resolves each challenge in pure Safe Rust.
+
+```text
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                              WHAT FIREBASE ACTUALLY DOES                              │
+├────────────────────┬───────────────────────────────────────────────────────────────────┤
+│ 1. Identity & Auth │ Firebase Auth: User directory, social OAuth, JWT sessions         │
+│ 2. Data Storage    │ Firestore: NoSQL document store, compound queries, collections    │
+│ 3. Realtime Sync   │ onSnapshot(): Persistent WebSocket push updates down to clients   │
+│ 4. Offline First   │ Optimistic UI updates, local cache, background sync on reconnect  │
+│ 5. Blob / Media    │ Cloud Storage: Direct client upload to GCS, signed URLs, CDN      │
+│ 6. Logic / Triggers│ Cloud Functions: Serverless handlers on DB writes, Auth, Crons   │
+│ 7. Access Rules    │ Security Rules: Declarative authorization (request.auth.uid)      │
+│ 8. Local Emulator  │ Emulator Suite & Console: Local offline testing + Web Dashboard   │
+└────────────────────┴───────────────────────────────────────────────────────────────────┘
+```
+
+### 3.1 Pillar 1: Identity & Authentication (Firebase Auth)
+* **What Firebase Does**: Manages user accounts, passwords, phone/SMS OTP, social logins (Google, Apple, GitHub), anonymous sessions, and issues signed JWT ID tokens with automatic background refresh.
+* **Why Developers Rely on It**: Eliminates the danger and complexity of password hashing, salt storage, OAuth 2.0 PKCE redirection flows, and session validation.
+* **The ATProto Conflict**: In Web2, user credentials and identity records live in Google's cloud database. In ATProto, **users possess sovereign decentralized identifiers** (`did:plc`, `did:web`). Authentication must not be custodial; apps must support decentralized **OAuth 2.1 with RFC 9449 DPoP (proof-of-possession binding tokens to ephemeral client keys)**, RFC 9126 PAR, and bidirectional handle resolution (`alsoKnownAs`).
+* **The `skybase` Solution (`skybase-auth`)**: Built directly on [`skyauth`]. Provides an ergonomic one-liner authentication API:
+  - Generates ephemeral ECDSA P-256 keys and computes RFC 7638 JWK thumbprints (`jkt`).
+  - Resolves handles via DNS TXT and HTTPS `.well-known` endpoints with strict SSRF boundaries.
+  - Automatically negotiates DPoP nonces and handles code exchange.
+  - Partitions active sessions across 64 lock-free `RwLock` shards with secure token zeroization on drop.
+
+### 3.2 Pillar 2: Data Storage & Compound Indexing (Cloud Firestore)
+* **What Firebase Does**: A hierarchical NoSQL document store (Collections $\rightarrow$ Documents). Provides sub-second compound queries (`.where("tag", "==", "rust").where("rating", ">=", 4).orderBy("created_at", "desc").limit(20)`) and automated index management.
+* **Why Developers Rely on It**: Fast, schemaless development with zero SQL schema migration overhead.
+* **The ATProto Conflict (The Sovereignty vs. Aggregation Paradox)**:
+  - In Firebase, all users write to one centralized database hosted by the developer.
+  - In ATProto, **users own their data in their personal PDS repository (an MST)**. If 50,000 users use an app, their records live on 50,000 different PDS instances.
+  - An app *cannot* query 50,000 remote PDS instances in real time to render an aggregated feed, comments list, or search index.
+* **The `skybase` Solution (`skybase-repo` + `skybase-index`)**: Resolves the paradox with a **Dual-Path Engine**:
+  - **Sovereign Write Path (`skybase-repo`)**: Client writes are signed with DPoP and submitted via XRPC (`com.atproto.repo.createRecord`) directly to the user's personal PDS. The user retains complete custody of their data.
+  - **Aggregated Read Path (`skybase-index`)**: An embedded **Micro-AppView** connects to the global Jetstream firehose, filters exclusively for the app's collection NSIDs (e.g. `com.myapp.review`), and replicates commits into an embedded SQLite WAL database with full-text search (FTS5) and compound secondary indexes.
+
+### 3.3 Pillar 3: Real-Time Push Synchronization (`onSnapshot`)
+* **What Firebase Does**: Keeps client state synchronized in real time via persistent WebSockets. Whenever a document or query result changes, Firebase computes the diff and pushes updates immediately to all listening clients without polling.
+* **Why Developers Rely on It**: Enables live chats, real-time dashboards, multiplayer games, and collaborative tools out of the box.
+* **The ATProto Conflict**: ATProto does not have a centralized push broker for arbitrary application records.
+* **The `skybase` Solution (`skybase-events`)**: In ATProto, the global firehose (Jetstream) *is* the change-data-capture stream. When any user's PDS commits a record, Jetstream broadcasts the event. `skybase-events` intercepts matching events, updates the local SQLite index, and pushes real-time diffs down WebSocket connections to listening client SDKs, recreating the beloved `.onSnapshot()` developer experience.
+
+### 3.4 Pillar 4: Offline Persistence & Optimistic UI Mutations
+* **What Firebase Does**: Maintains a local client-side cache (IndexedDB in the browser, SQLite on mobile). Reads are served from cache; writes immediately update the UI (optimistic update), are queued locally, and sync to the server when network connectivity is restored.
+* **Why Developers Rely on It**: Zero-latency UI response and seamless offline mobile resilience.
+* **The ATProto Conflict**: ATProto records require cryptographic CIDs and sequence commit hashes from the user's remote PDS.
+* **The `skybase` Solution**: `skybase` leverages ATProto TID (Timestamp Identifier) generation. Record keys are deterministically generated on the client, enabling instant optimistic rendering in the local cache. The client SDK queues the DPoP-signed XRPC write and synchronizes with the user's PDS upon reconnection.
+
+### 3.5 Pillar 5: Asset & Blob Storage (Cloud Storage for Firebase)
+* **What Firebase Does**: Object storage backed by Google Cloud Storage (GCS). Allows direct-from-client uploads with progress monitoring, resumable transfers, signed download URLs, and global CDN delivery.
+* **Why Developers Rely on It**: Avoids proxying large binary media files through application servers.
+* **The ATProto Conflict**: ATProto supports blob storage on each PDS (`com.atproto.repo.uploadBlob`), where blobs are content-addressed using cryptographic CIDs (SHA-256 multihash) and referenced inside records via `$type: "blob"`. However, PDSs have strict storage quotas, and serving viral media directly from a user's home PDS causes severe bandwidth throttling.
+* **The `skybase` Solution (`skybase-storage`)**:
+  - Validates file headers, magic bytes, and MIME types to prevent malicious uploads.
+  - Computes the SHA-256 multihash and ATProto CID before transmission.
+  - Uploads the blob to the user's sovereign PDS with DPoP credentials.
+  - Optionally mirrors the blob into a local disk LRU or Cloudflare R2 / AWS S3 edge cache to shield user PDSs from high-volume read traffic.
+
+### 3.6 Pillar 6: Serverless Event Triggers (Cloud Functions)
+* **What Firebase Does**: Automatically executes backend functions in response to database writes (`onDocumentCreated`), auth changes (`onUserCreated`), storage uploads, or cron schedules (`onSchedule`).
+* **Why Developers Rely on It**: Decouples asynchronous background tasks (calculating scores, sending notifications, aggregating metrics) from frontend client requests.
+* **The ATProto Conflict**: App backends must react to decentralized commits broadcast over the global firehose.
+* **The `skybase` Solution (`skybase-events`)**: Provides declarative in-process asynchronous Rust event hooks:
+  ```rust
+  skybase.events().on_create("com.example.review", |event| async move {
+      recalculate_aggregate_rating(&event.record.item_id).await?;
+      Ok(())
+  });
+  ```
+  Backed by a durable monotonic sequence cursor persisted to disk, ensuring zero dropped events across server restarts.
+
+### 3.7 Pillar 7: Declarative Security & Access Rules (Firebase Security Rules)
+* **What Firebase Does**: Evaluates a declarative domain-specific rule language on every database and storage request (`allow write: if request.auth.uid == resource.data.authorId`).
+* **Why Developers Rely on It**: Enforces authorization and schema constraints directly at the data layer, eliminating boiler-plate CRUD controller endpoints.
+* **The ATProto Conflict**: Security in ATProto is cryptographic. A PDS will only commit records signed by the private key belonging to that user's DID document. On the AppView side, the indexer must verify that incoming firehose records were genuinely authored by the claiming DID.
+* **The `skybase` Solution (`skybase-rules`)**: Validates commit signatures against the author's public key extracted from their DID document, verifies author DID ownership, and enforces strict schema validation against bundled ATProto Lexicons.
+
+### 3.8 Pillar 8: Local Emulator Suite & Web Admin Console
+* **What Firebase Does**: Running `firebase emulators:start` spins up local emulators of Auth, Firestore, and Functions on `localhost`, paired with a browser-based Admin Console for inspecting records, users, and logs.
+* **Why Developers Rely on It**: Fast, hermetic local development and automated CI testing without cloud bills or network dependencies.
+* **The ATProto Conflict**: Setting up a local ATProto dev environment typically requires running a local PDS, a local BGS relay, a PLC directory mock, and an OAuth authorization server — a massive barrier for developers.
+* **The `skybase` Solution (`skybase-server`)**: A single, zero-dependency binary executable (PocketBase-style). Running `./skybase-server` spins up:
+  - Embedded SQLite database engine.
+  - Local REST and WebSocket API gateway.
+  - Ingestion consumer with mock PDS and mock Jetstream test modes.
+  - Embedded Web Admin dashboard (bundled directly into the binary via `rust-embed`) allowing developers to explore collections, inspect firehose lag, and test queries in real time.
+
+---
+
+## 4. Scope & Feature Matrix
+
+| Firebase Feature | `skybase` Pillar | Underlying ATProto / Standards Mechanism |
 | :--- | :--- | :--- |
 | **Firebase Auth** | `skybase-auth` | Powered by `skyauth`: OAuth 2.1, RFC 9449 DPoP, RFC 9126 PAR, RFC 7636 PKCE, DID/Handle resolution, SSRF boundaries. |
 | **Cloud Firestore (Write)** | `skybase-repo` | Direct XRPC writes (`com.atproto.repo.putRecord`, `createRecord`, `applyWrites`) signed into user's PDS MST repository. |
@@ -108,9 +201,9 @@ Powered by [`skyauth`] for cryptographic identity and authentication, `skybase` 
 
 ---
 
-## 4. Architectural Blueprint & Data Flow
+## 5. Architectural Blueprint & Data Flow
 
-### 4.1 System Architecture Diagram
+### 5.1 System Architecture Diagram
 
 ```mermaid
 flowchart TD
@@ -187,7 +280,7 @@ flowchart TD
     JetstreamSub --> EventDispatcher
 ```
 
-### 4.2 The Sovereign Write & Micro-AppView Read Flow
+### 5.2 The Sovereign Write & Micro-AppView Read Flow
 
 ```mermaid
 sequenceDiagram
@@ -227,9 +320,9 @@ sequenceDiagram
 
 ---
 
-## 5. Detailed Component Specifications
+## 6. Detailed Component Specifications
 
-### 5.1 `skybase-auth`: Authentication & Identity
+### 6.1 `skybase-auth`: Authentication & Identity
 Built directly on top of [`skyauth`]:
 - **Turn-key Integration**: Wraps `skyauth::client::AtprotoOAuthClient` with higher-level application session lifecycle management.
 - **Session Continuity**: Automatic, transparent DPoP access token refresh before expiration.
@@ -237,13 +330,13 @@ Built directly on top of [`skyauth`]:
 - **Framework Middleware**: Ready-to-use extractors and guards for Axum 0.7, Actix-Web 4, and Tower services.
 - **Zeroization**: Cryptographic keys and sensitive session tokens are securely scrubbed from memory on drop via `zeroize`.
 
-### 5.2 `skybase-repo`: Sovereign Repository Engine
+### 6.2 `skybase-repo`: Sovereign Repository Engine
 - **Direct Sovereign Writes**: Issues XRPC calls directly to the user's authoritative PDS using DPoP-signed credentials.
 - **Strong Typing & Lexicons**: Generic record definitions `Record<T>` where `T: Serialize + DeserializeOwned`.
 - **Atomic Batch Mutations**: Support for `com.atproto.repo.applyWrites` to create, update, and delete multiple records across collections in a single atomic commit.
 - **Schema Validation**: Dynamic runtime validation against bundled ATProto Lexicons to prevent malformed records from reaching the PDS.
 
-### 5.3 `skybase-index`: Embedded Micro-AppView
+### 6.3 `skybase-index`: Embedded Micro-AppView
 - **Targeted Jetstream Ingestion**: Connects to Bluesky Jetstream (`wss://jetstream1.us-east.bsky.network/subscribe`) requesting only the collection NSIDs used by the application.
 - **Zero-Waste Filter**: Drastically reduces network ingress and memory usage compared to consuming the entire uncompressed raw firehose.
 - **Embedded Storage**: High-performance SQLite engine configured with Write-Ahead Logging (`PRAGMA journal_mode=WAL`), memory-mapped I/O (`PRAGMA mmap_size`), and synchronous normal mode for concurrent readers and sub-millisecond writes.
@@ -260,7 +353,7 @@ Built directly on top of [`skyauth`]:
 - **Full-Text Search**: Built-in SQLite FTS5 extension indexing textual content with BM25 ranking.
 - **Pluggable SQL Backend**: Optional PostgreSQL backend support for high-throughput enterprise deployments.
 
-### 5.4 `skybase-events`: Reactive Trigger Pipeline
+### 6.4 `skybase-events`: Reactive Trigger Pipeline
 - **Declarative Event Hooks**:
   ```rust
   skybase.events().on_create("com.example.chat.message", |event| async move {
@@ -271,13 +364,13 @@ Built directly on top of [`skyauth`]:
 - **Durable Cursor Persistence**: Ingestion cursor (sequence timestamp in microseconds) is periodically committed to disk. On restart, the engine resumes exactly from the last processed sequence with zero record loss.
 - **Backpressure & Bounded Buffers**: Bounded MPSC channels with drop-alerting metrics preventing memory exhaustion during network traffic spikes.
 
-### 5.5 `skybase-storage`: Sovereign Blob Management
+### 6.5 `skybase-storage`: Sovereign Blob Management
 - **PDS Blob Upload**: Handles `com.atproto.repo.uploadBlob` with DPoP authentication.
 - **Integrity Verification**: Verifies SHA-256 multihash and computes ATProto CID before transmission.
 - **MIME & Magic Byte Validation**: Inspects file headers to block malicious executable payloads and ensure format compliance (JPEG, PNG, WebP, MP4, etc.).
 - **Edge Cache Proxy**: Optionally caches requested blobs in a local disk LRU or Cloudflare R2 / AWS S3 mirror to protect user PDSs from high-volume read traffic.
 
-### 5.6 `skybase-server`: Standalone Gateway Daemon
+### 6.6 `skybase-server`: Standalone Gateway Daemon
 - Single binary that launches a complete backend server without writing any Rust code.
 - **REST Endpoints**:
   - `POST /api/v1/auth/login`: Initiates OAuth authorization.
@@ -294,7 +387,7 @@ Built directly on top of [`skyauth`]:
 
 ---
 
-## 6. Repository Layout & Crate Structure
+## 7. Repository Layout & Crate Structure
 
 ```
 skybase/
@@ -303,6 +396,7 @@ skybase/
 ├── LICENSE-APACHE              # Apache 2.0 License
 ├── README.md                   # Quickstart, installation, and architectural summary
 ├── PRD.md                      # This comprehensive Product Requirements Document
+├── AGENTS.md                   # Agent handover & Rust best practice invariants
 ├── src/
 │   ├── lib.rs                  # Crate root with #![forbid(unsafe_code)] and core facade
 │   ├── error.rs                # Strongly-typed SkybaseError enum
@@ -349,9 +443,9 @@ skybase/
 
 ---
 
-## 7. Developer Experience: Code Examples
+## 8. Developer Experience: Code Examples
 
-### 7.1 Initializing `skybase` and Authenticating (Rust)
+### 8.1 Initializing `skybase` and Authenticating (Rust)
 
 ```rust
 use skybase::{Skybase, SkybaseConfig};
@@ -376,7 +470,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### 7.2 Writing a Sovereign Record & Querying the Micro-AppView
+### 8.2 Writing a Sovereign Record & Querying the Micro-AppView
 
 ```rust
 use serde::{Deserialize, Serialize};
@@ -425,7 +519,7 @@ async fn create_and_query_review(
 }
 ```
 
-### 7.3 Frontend Client Experience (TypeScript SDK)
+### 8.3 Frontend Client Experience (TypeScript SDK)
 
 ```typescript
 import { SkybaseClient } from '@skybase/client';
@@ -454,27 +548,39 @@ const unsubscribe = skybase.collection('app.bsky.feed.post')
 
 ---
 
-## 8. Security & Invariant Verification
+## 9. Security, Invariants & Architectural Rigor
 
-1. **Inherited `skyauth` Security Guarantees**:
-   - **Formally Verified Kernels**: SSRF boundary classifiers, constant-time comparisons, and PKCE byte validators formally proven via Verus and Kani.
-   - **No Shared Secrets**: Strict public-client DPoP architecture; no static secrets exposed.
-   - **Bounded Memory & Bounded Egress**: SSRF filter blocking loopback, link-local, RFC 1918, IPv6 ULA, and 6to4/Teredo tunneling.
-2. **Commit Signature Verification**:
-   - When indexing records from Jetstream, `skybase-index` verifies that the commit author matches the record repository DID.
-3. **Data Loss & Resumption Guarantees**:
-   - Ingestion cursors are atomic and monotonically increasing.
-   - Crash-resilient SQLite WAL journaling ensures index consistency without corruption under sudden power loss.
-4. **Partitioned Concurrency**:
-   - Active sessions and in-memory caches are partitioned across 64 independent `RwLock` shards to eliminate lock contention under multi-threaded load.
+1. **Zero Unsafe Code & Compiler Lints**:
+   - The crate enforces `#![forbid(unsafe_code)]` with zero `unsafe` blocks.
+   - Strict compiler lints (`missing_docs`, `clippy::unwrap_used`, `clippy::expect_used`, `clippy::panic`, `clippy::todo`, `clippy::unimplemented`) guarantee compile-time safety and zero panics.
+2. **Inherited `skyauth` Security Guarantees**:
+   - **Formally Verified Kernels**: SSRF boundary classifiers, constant-time comparisons (`constant_time_eq`), and PKCE byte validators formally proven via Verus and Kani with anti-vacuity gates.
+   - **No Shared Secrets**: Public-client DPoP architecture with asymmetric ephemeral ECDSA P-256 keys. No static secrets.
+   - **Strict SSRF Boundary**: Hardened egress filters blocking loopback, link-local, RFC 1918, IPv6 ULA, and 6to4/Teredo tunneling prefixes.
+3. **Defensive Concurrency & Sharded State Partitioning**:
+   - Multi-tenant state caches and firehose subscription maps are partitioned into **64 independent `RwLock` shards** to eliminate lock contention.
+   - **Never Hold Locks Across `.await` Points**: Synchronous mutex or `RwLock` guards are strictly dropped before executing any `.await`, `sleep()`, or network I/O.
+4. **Clock-Warp Safety & Drift-Free Scheduling**:
+   - All elapsed time computations use `now.saturating_duration_since(earlier)` or `.map_or(0, ...)` to safeguard against clock jumps during VM suspension or NTP syncs.
+   - Background intervals (cursor persistence, token renewals) run relative to fixed anchor timestamps via `tokio::time::interval`.
+5. **Task Leak Prevention & Cancellation**:
+   - Background tasks (Jetstream consumer, event dispatcher, cleanup routines) are tracked in a managed `tokio::task::JoinSet` tied to a `tokio_util::sync::CancellationToken`, ensuring clean teardown on shutdown or drop.
+6. **Commit Signature Verification & Author Authenticity**:
+   - When indexing records from Jetstream, `skybase-rules` verifies that the commit author matches the repository DID and that the commit signature is verified against the author's public signing key in their DID document.
+7. **Crash-Resilient Storage & Monotonic Cursors**:
+   - Ingestion sequence timestamps are atomic and strictly monotonic.
+   - SQLite WAL (Write-Ahead Logging) journaling ensures index consistency without corruption under abrupt power failure.
+8. **100% Documentation Coverage**:
+   - All public APIs, types, functions, and modules are thoroughly documented. Bare URLs are enclosed in angle brackets (`<https://...>`).
 
 ---
 
-## 9. Implementation Roadmap & Milestones
+## 10. Implementation Roadmap & Milestones
 
 ### Phase 1: Foundation & Core Infrastructure (Weeks 1–3)
 - [x] Repository initialization (`#![forbid(unsafe_code)]`, strict lints, typed errors).
 - [x] Integrate `skyauth` dependency and configure `SkybaseConfig`.
+- [x] Establish architectural blueprint and formal `AGENTS.md` guidelines.
 - [ ] Implement `skybase-auth` high-level session coordinator and auto-refresh worker.
 - [ ] Implement `skybase-repo` XRPC client (`createRecord`, `putRecord`, `deleteRecord`).
 - [ ] Comprehensive unit and mock integration test suites.
@@ -503,3 +609,4 @@ const unsubscribe = skybase.collection('app.bsky.feed.post')
 - [ ] React hooks package (`@skybase/react`: `useSkybaseAuth`, `useCollection`).
 - [ ] Security audit, mutation testing sweep, and cargo-deny compliance scan.
 - [ ] Documentation website and reference starter templates (Decentralized Blog, Micro-Feed, Chat).
+
