@@ -4,20 +4,20 @@
 [![Safety Guard](https://img.shields.io/badge/unsafe-forbidden-success.svg)](src/lib.rs)
 [![Rust Version](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](Cargo.toml)
 
-> **The Open-Source Backend & Developer Platform for the AT Protocol.**
-> *"Firebase for ATProto, powered by `skyauth`."*
+> **The Turn-Key Micro-AppView Engine & Local Dev Platform for the AT Protocol.**
+> *"Firebase-Like DX for ATProto, powered by `skyauth`."*
 
 ---
 
 ## 🌟 Highlights
 
-- **User Data Sovereignty First**: Never locks user data into proprietary databases. All records are written directly into users' personal PDS repositories (signed Merkle Search Trees).
-- **Turn-Key ATProto OAuth 2.1**: Powered directly by [`skyauth`] — zero-panic, pure Safe Rust implementation of RFC 9449 DPoP, RFC 9126 PAR, RFC 7636 PKCE, and decentralized identity resolution (`did:plc`, `did:web`).
-- **Embedded Micro-AppView Engine**: Subscribes directly to the Bluesky Jetstream firehose, filters for your application's specific collection NSIDs, and indexes records into an embedded high-concurrency database (SQLite WAL / PostgreSQL) with full-text search.
-- **100% Pure Safe Rust**: `#![forbid(unsafe_code)]` enforced crate-wide with 0 `unsafe` blocks and zero production panics.
-- **Reactive Triggers & Events**: Declarative event hooks (`on_record_created`, `on_record_deleted`) with durable monotonic cursor persistence and zero record drop.
-- **Sovereign Blob Management**: Seamless blob upload to PDS with cryptographic CID digest calculation, MIME validation, and edge CDN caching.
-- **Dual Deployment Modes**: Use as a modular Rust crate inside your Axum/Actix/Tower microservice OR run as a standalone zero-config daemon (like PocketBase or Supabase) with REST, WebSocket, and Web Admin dashboard.
+- **The Strategic Wedge: Micro-AppView in One Binary**: Point `./skybase` at your collection NSID (`com.myapp.review`). It continuously ingests Jetstream, stores records in an embedded SQLite WAL database with full-text search (FTS5), and serves an instant REST & WebSocket query API.
+- **Zero Token Custody by Default**: Frontends authenticate and write directly to user PDSs via `@atproto/oauth-client-browser`. `skybase` indexes public commits from Jetstream, holding **zero user refresh tokens or private keys**.
+- **Hermetic Local Dev Sandbox (`skybase dev --mock`)**: Mock relay and synthetic Jetstream event replay engine allowing you to build and test full-stack ATProto apps offline with zero cloud configuration.
+- **Eventual Consistency with Optimistic UX**: The `@skybase/client` SDK provides deterministic TID tracking and optimistic reconciliation (`isPending`, `isOptimistic`, `isLagging`) so React/Vue components never flicker or drop mutations.
+- **100% Pure Safe Rust**: `#![forbid(unsafe_code)]` enforced crate-wide with 0 `unsafe` blocks, strict clippy denials, and zero production panics.
+- **Turn-Key Server-Side Bot Auth**: When background daemons need to write autonomously, `skybase` integrates [`skyauth`] with **AES-256-GCM encryption at rest** for refresh tokens.
+- **Dual Deployment Modes**: Single prebuilt binary (PocketBase-style) for frontend developers OR embeddable modular Rust crate for high-throughput systems services.
 
 ---
 
@@ -25,14 +25,14 @@
 
 | Firebase Component | `skybase` Pillar | AT Protocol Primitive |
 | :--- | :--- | :--- |
-| **Firebase Auth** | `skybase-auth` | Decentralized OAuth 2.1 + RFC 9449 DPoP via `skyauth` |
+| **Firestore (Queries)** | `skybase-index` | Embedded Micro-AppView (SQLite WAL + JSON1 + FTS5) synced from Jetstream |
+| **Realtime Subscriptions** | `skybase-events` | WebSocket live queries & optimistic state reconciliation |
+| **Local Emulator / Admin** | `skybase-server` | Single-binary daemon (`./skybase dev`) with mock Jetstream & Admin UI |
+| **Client SDKs** | `@skybase/client` | Zero-custody TypeScript SDK linking browser OAuth writes to live queries |
 | **Firestore (Writes)** | `skybase-repo` | Sovereign XRPC writes to user PDS Merkle Search Trees |
-| **Firestore (Queries)** | `skybase-index` | Embedded Micro-AppView (SQLite WAL) synced from Jetstream |
-| **Realtime Subscriptions** | `skybase-events` | WebSocket live queries & reactive hooks off Jetstream |
-| **Cloud Storage** | `skybase-storage` | PDS blob upload (`uploadBlob`) with CID verification & CDN |
-| **Security Rules** | `skybase-rules` | Lexicon schema validation & commit cryptographic verification |
-| **Local Emulator / Admin** | `skybase-server` | Single-binary daemon with embedded SQLite & Admin UI |
-| **Client SDKs** | `skybase-sdk` | Rust crate + `@skybase/client` for TypeScript / React |
+| **Firebase Auth (Bots)** | `skybase-auth` | Decentralized OAuth 2.1 + DPoP via `skyauth` (AES-256-GCM encrypted) |
+| **Cloud Storage** | `skybase-storage` | PDS blob upload (`uploadBlob`) with CID verification |
+| **Security Rules** | `skybase-rules` | Lexicon schema validation & author commit cryptographic verification |
 
 > **Architecture Note**: While adopting Firebase's beloved developer ergonomics (one-liner auth, collection queries, `.onSnapshot()`), `skybase` is an **eventually-consistent Micro-AppView backend**, honoring ATProto's sovereign PDS repository writes and asynchronous firehose replication.
 

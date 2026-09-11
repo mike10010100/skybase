@@ -75,6 +75,16 @@ Every crate root enforces the strict compiler lint safety guard:
 - **Zero-Toolchain Local DX**: Application developers must never be required to install Rust, Cargo, or C++ compilers. The daemon must be distributable as a standalone precompiled binary (`npx skybase dev`, `brew install skybase`).
 - **Extensibility Without Recompilation**: Event triggers and functions must support HTTP Webhook dispatching (e.g. to Next.js API routes or serverless handlers) and optional embedded scripting (QuickJS/Wasm), ensuring non-Rust developers can write backend logic without recompiling the daemon.
 
+### 8. Scope Discipline vs. Safety Bar (The Narrow Wedge Mandate)
+- **Never Compromise Safety for Schedule**: When faced with timeline pressure, never lower quality gates, skip test suites, allow `.unwrap()`, or bypass compiler safety. Instead, **ruthlessly narrow the functional scope**.
+- **Phase 1.5 Priority**: Immediate engineering effort is focused on the **Thin Vertical Slice**:
+  $$\text{DPoP Login} \longrightarrow \text{PDS write} \longrightarrow \text{Jetstream Ingest} \longrightarrow \text{SQLite Upsert} \longrightarrow \text{Live Query}$$
+  De-risk this single loop end-to-end before expanding to peripheral pillars.
+
+### 9. Two Operating Topologies & Honest Custody Boundaries
+- **Topology A (Client-Sovereign, Zero Custody)**: The default for web and mobile frontends. Authentication and writes go directly from the client device to the user's PDS. `skybase` indexes public commits from Jetstream into SQLite WAL. **Skybase holds zero user credentials.**
+- **Topology B (Daemon-Custodial)**: Used for autonomous bots and feed generators. In this mode, the daemon is an OAuth credential custodian. All refresh tokens and private keys stored at rest must be encrypted using **AES-256-GCM** (`SKYBASE_MASTER_KEY`).
+
 ---
 
 ## 🏗️ Architecture Quick Reference

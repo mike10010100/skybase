@@ -1,7 +1,7 @@
 # 📄 Product Requirements Document (PRD)
 
 # `skybase`
-### The Open-Source Backend & Developer Platform for the AT Protocol ("Firebase for ATProto")
+### The Turn-Key Micro-AppView Engine & Backend Platform for the AT Protocol ("Firebase-Like DX for ATProto")
 
 ---
 
@@ -20,28 +20,52 @@ In the **AT Protocol (ATProto)**, this mental model is inverted:
 - **Authentication Complexity**: App passwords are deprecated for public apps. ATProto mandates **OAuth 2.1 with RFC 9449 DPoP (Demonstrating Proof-of-Possession)**, **RFC 9126 PAR (Pushed Authorization Requests)**, **RFC 7636 PKCE**, decentralized identity discovery (`did:plc`, `did:web`, DNS TXT, `.well-known`), and strict SSRF defenses.
 - **Firehose Ingestion Scalability**: Consuming the ATProto firehose or Jetstream requires managing WebSocket connections, backpressure, cursor persistence, sequence reordering, and schema deserialization.
 
-### 1.2 The Ecosystem Problem
-Currently, developers wanting to build an application on ATProto face a massive barrier to entry. They must individually implement:
-- Complex OAuth 2.1 + DPoP token negotiation and storage.
-- Custom WebSocket consumers for Jetstream or the firehose.
-- Custom relational databases or search indexes to aggregate cross-user records.
-- Blob upload pipelines with CID computation and media caching.
-- Event dispatchers and background task schedulers.
+### 1.2 The Ecosystem Problem & The Real Bottleneck
+Currently, developers wanting to build an application on ATProto face a massive barrier to entry. But where is the actual bottleneck?
+
+* **Frontend Auth & Single-User Writes Are Already Solved**: Official client-side TypeScript libraries (`@atproto/api`, `@atproto/oauth-client-browser`) already allow a frontend web app or mobile client to authenticate users and write records directly to their PDS from the browser.
+* **The Actual Unsolved Friction Is Multi-User Querying**: The moment a developer wants to show:
+  - *"All reviews for this book"*
+  - *"All comments on this article"*
+  - *"A leaderboard of players in this game"*
+  - *"A full-text search across all user-generated records"*
+  ...they hit a brick wall. A client cannot query 10,000 independent remote PDSs in real time. **Every developer is forced to build their own firehose consumer, backfill pipeline, database schema, and query API.** This undifferentiated heavy lifting is where almost all ATProto app attempts die.
 
 As highlighted in the Bluesky ecosystem discussion between developers:
 > *"the highest-leverage thing we can do to grow atproto right now is make it easier for devs to build apps on... 'firebase for atproto' is a good target."*
 
-### 1.3 The Solution: `skybase`
-`skybase` is an open-source, `#![forbid(unsafe_code)]` pure Safe Rust backend framework, standalone daemon, and client SDK suite that brings the developer ergonomics of Firebase/Supabase to the AT Protocol.
+### 1.3 The Strategic Wedge: The Turn-Key Micro-AppView Engine
+Rather than attempting to boil the ocean by shipping 8 disparate pillars at once, `skybase` enters the market with a **razor-sharp wedge**:
 
-Powered by [`skyauth`] for cryptographic identity and authentication, `skybase` provides:
-1. **`skybase-auth`**: Turn-key decentralized OAuth 2.1, DPoP session lifecycle, and web framework middleware.
-2. **`skybase-repo`**: Ergonomic sovereign repository CRUD engine with compile-time and runtime Lexicon validation. Records are written directly to user PDSs with cryptographic signatures.
-3. **`skybase-index`**: Embedded Micro-AppView engine. Filters the Jetstream/firehose for specified collection NSIDs, replicating matching records into an embedded high-concurrency database (SQLite WAL / Turso / Postgres) with full-text search and secondary indexes.
-4. **`skybase-events`**: Reactive triggers and webhooks (`on_record_created`, `on_record_deleted`) with durable cursor resumption and backpressure defense.
-5. **`skybase-storage`**: Sovereign blob management. Uploads blobs to user PDS with CID verification, magic byte validation, and optional edge-cached CDN proxying.
-6. **`skybase-server` (Standalone Daemon)**: Single-binary executable (PocketBase-style) providing a unified REST and WebSocket API, complete with an embedded Web Admin dashboard.
-7. **Client SDKs**: Idiomatic Rust crate + TypeScript / JavaScript client library for React, React Native, Next.js, and mobile platforms.
+> **The Turn-Key, Single-Binary Micro-AppView**:
+> Download one binary (`./skybase`). Point it at your application's collection NSID (`com.myapp.review`). It continuously ingests the Jetstream firehose, stores records in an embedded SQLite WAL database with full-text search (FTS5), and exposes an instant REST & WebSocket query API.
+
+This wedge unlocks an immediate architectural breakthrough: **Zero Token Custody**.
+- In standard web and mobile apps, the user authenticates in the browser via `@atproto/oauth-client-browser` and writes directly to their personal PDS.
+- `skybase` runs as a zero-custody Micro-AppView, indexing public commits from Jetstream.
+- **Skybase never holds, stores, or touches user private OAuth refresh tokens.** The "sovereignty" promise is 100% literal.
+- *(For backend bots and feed generators requiring server-side writes, `skybase` integrates `skyauth` with AES-256-GCM encrypted tokens at rest).*
+
+### 1.4 Prior Art & Landscape Differentiation ("Why Not X?")
+
+Knowledgeable ATProto developers will immediately ask: *"How does this compare to existing tools?"*
+
+| Existing Tool | What It Does | Why It Is Insufficient / Where `skybase` Wins |
+| :--- | :--- | :--- |
+| **`@atproto/api`** | Official TypeScript XRPC client. | Only speaks to **one user's PDS at a time**. Has no database, cannot perform cross-user queries, and cannot build an aggregated feed or search index. |
+| **`@atproto/oauth-client-*`**| Official TypeScript OAuth client. | Handles login flows, but provides zero data storage, firehose indexing, or query infrastructure. |
+| **Bluesky's `Tap`** | Internal Go tool for filtering the raw firehose with backfill. | A low-level streaming pipe (event bus). It does **not** give you a queryable database, REST API, SQLite storage, or WebSocket push subscriptions. |
+| **`skyware/jetstream`** | Node.js WebSocket client for Jetstream. | A raw WebSocket listener. You still have to hand-roll SQLite schemas, JSON parsing, cursor tracking, deduplication, and query endpoints. |
+| **`HappyView`** | Lexicon-driven AppView server in Rust. | Focuses on runtime schema reflection and Lua scripting. Uses `atrium-oauth`. It is an AppView server, not an ergonomic BaaS/developer SDK. |
+| **`skybase`** | **Complete Micro-AppView in one binary.** | Combines Jetstream ingestion + historical PDS backfill + SQLite WAL storage + JSON1 virtual indexes + FTS5 full-text search + REST/WebSocket live queries in a single prebuilt binary with zero configuration. |
+
+### 1.5 Project Identity & Namespace Clarity
+- **Disambiguation**: `skybase` is an independent open-source developer framework and Micro-AppView engine for the AT Protocol. It has no relationship, affiliation, or association with `skybase.ai` (an enterprise Kubernetes/cloud security compliance product).
+- **Public Namespaces**:
+  - Rust Crate: `skybase` on crates.io
+  - TypeScript SDK: `@skybase/client` and `@skybase/react` on npm
+  - GitHub: `https://github.com/mike10010100/skybase`
+  - Bluesky/ATProto: `#skybase` / `@skybase.dev`
 
 ---
 
@@ -168,11 +192,19 @@ To build an authentic "Firebase for the AT Protocol", we must rigorously deconst
 * **What Firebase Does**: Manages user accounts, passwords, phone/SMS OTP, social logins (Google, Apple, GitHub), anonymous sessions, and issues signed JWT ID tokens with automatic background refresh.
 * **Why Developers Rely on It**: Eliminates the danger and complexity of password hashing, salt storage, OAuth 2.0 PKCE redirection flows, and session validation.
 * **The ATProto Conflict**: In Web2, user credentials and identity records live in Google's cloud database. In ATProto, **users possess sovereign decentralized identifiers** (`did:plc`, `did:web`). Authentication must not be custodial; apps must support decentralized **OAuth 2.1 with RFC 9449 DPoP (proof-of-possession binding tokens to ephemeral client keys)**, RFC 9126 PAR, and bidirectional handle resolution (`alsoKnownAs`).
-* **The `skybase` Solution (`skybase-auth`)**: Built directly on [`skyauth`]. Provides an ergonomic one-liner authentication API:
-  - Generates ephemeral ECDSA P-256 keys and computes RFC 7638 JWK thumbprints (`jkt`).
-  - Resolves handles via DNS TXT and HTTPS `.well-known` endpoints with strict SSRF boundaries.
-  - Automatically negotiates DPoP nonces and handles code exchange.
-  - Partitions active sessions across 64 lock-free `RwLock` shards with secure token zeroization on drop.
+* **The `skybase` Solution: Two Clear Topologies & The Zero-Custody Boundary**:
+  To resolve the fundamental tension between developer convenience and user sovereignty, `skybase` explicitly delineates two operating models:
+  1. **Topology A: Client-Sovereign (Browser/Mobile) — Zero Skybase Custody (Default for 95% of Apps)**:
+     - The user authenticates directly with their personal PDS from the client application using `@atproto/oauth-client-browser` or mobile keystores.
+     - Ephemeral DPoP private keys and refresh tokens remain strictly on the client device (IndexedDB / iOS Keychain / Android Keystore).
+     - The client submits writes directly to their personal PDS.
+     - `skybase` operates strictly as a read/indexing Micro-AppView.
+     - **Skybase holds ZERO user private keys or refresh tokens.** User data sovereignty is absolute.
+  2. **Topology B: Server-Managed (Backend Daemons, Feed Generators, Automated Bots)**:
+     - Built on [`skyauth`], this mode is used when a backend service must write records autonomously without an active browser session.
+     - *Honest Custody Boundary*: In this mode, the server **is** an OAuth credential custodian.
+     - To protect against database exfiltration, all tokens and private keys stored at rest are encrypted using **AES-256-GCM** with a master secret (`SKYBASE_MASTER_KEY`).
+     - Ephemeral session keys implement `zeroize::Zeroize` on drop and are sharded across 64 lock-free `RwLock` partitions.
 
 ### 3.2 Pillar 2: Data Storage & Compound Indexing (Cloud Firestore)
 * **What Firebase Does**: A hierarchical NoSQL document store (Collections $\rightarrow$ Documents). Provides sub-second compound queries (`.where("tag", "==", "rust").where("rating", ">=", 4).orderBy("created_at", "desc").limit(20)`) and automated index management.
@@ -182,14 +214,24 @@ To build an authentic "Firebase for the AT Protocol", we must rigorously deconst
   - In ATProto, **users own their data in their personal PDS repository (an MST)**. If 50,000 users use an app, their records live on 50,000 different PDS instances.
   - An app *cannot* query 50,000 remote PDS instances in real time to render an aggregated feed, comments list, or search index.
 * **The `skybase` Solution (`skybase-repo` + `skybase-index`)**: Resolves the paradox with a **Dual-Path Engine**:
-  - **Sovereign Write Path (`skybase-repo`)**: Client writes are signed with DPoP and submitted via XRPC (`com.atproto.repo.createRecord`) directly to the user's personal PDS. The user retains complete custody of their data.
+  - **Sovereign Write Path**: Client writes are signed with DPoP and submitted via XRPC (`com.atproto.repo.createRecord`) directly to the user's personal PDS. The user retains complete custody of their data.
   - **Aggregated Read Path (`skybase-index`)**: An embedded **Micro-AppView** connects to the global Jetstream firehose, filters exclusively for the app's collection NSIDs (e.g. `com.myapp.review`), and replicates commits into an embedded SQLite WAL database with full-text search (FTS5) and compound secondary indexes.
 
-### 3.3 Pillar 3: Real-Time Push Synchronization (`onSnapshot`)
+### 3.3 Pillar 3: Real-Time Push Synchronization (`onSnapshot`) & The Eventual Consistency UX
 * **What Firebase Does**: Keeps client state synchronized in real time via persistent WebSockets. Whenever a document or query result changes, Firebase computes the diff and pushes updates immediately to all listening clients without polling.
 * **Why Developers Rely on It**: Enables live chats, real-time dashboards, multiplayer games, and collaborative tools out of the box.
-* **The ATProto Conflict**: ATProto does not have a centralized push broker for arbitrary application records.
-* **The `skybase` Solution (`skybase-events`)**: In ATProto, the global firehose (Jetstream) *is* the change-data-capture stream. When any user's PDS commits a record, Jetstream broadcasts the event. `skybase-events` intercepts matching events, updates the local SQLite index, and pushes real-time diffs down WebSocket connections to listening client SDKs, recreating the beloved `.onSnapshot()` developer experience.
+* **The ATProto Conflict & The Consistency Gap**:
+  - In Firestore, writes are immediately visible locally and globally committed within Google's cloud in single-digit milliseconds.
+  - In ATProto, writes traverse an asynchronous network path:
+    $$\text{Client} \xrightarrow{\text{write}} \text{User PDS} \xrightarrow{\text{commit}} \text{Relay (BGS)} \xrightarrow{\text{stream}} \text{Jetstream} \xrightarrow{\text{WS}} \text{Skybase Indexer} \xrightarrow{\text{push}} \text{Client}$$
+  - The round-trip propagation delay across this distributed pipeline is typically **50ms to 500ms** (and can spike higher during network congestion).
+  - If a client relies on naive `.onSnapshot()`, they face UI flicker, temporary duplicate entries, or missing writes immediately after saving.
+* **The `skybase` Solution: Optimistic State Reconciliation Protocol**:
+  `@skybase/client` bridges the consistency gap with explicit UX lifecycle primitives:
+  1. **Deterministic Client TID**: When calling `collection.create(data)`, the client SDK assigns a deterministic Timestamp Identifier (`rkey`) and injects the record into local memory with `_syncStatus: 'optimistic'`. The UI updates with zero perceptible latency.
+  2. **PDS Commit Ack**: When the user's PDS confirms the XRPC write, the client updates to `_syncStatus: 'pds_committed'` with the authoritative `cid` and `uri`.
+  3. **Jetstream AppView Reconciliation**: When `skybase` indexes the commit from Jetstream and broadcasts it down the WebSocket, the client SDK reconciles the event against the pending TID/CID, transitioning to `_syncStatus: 'confirmed'`.
+  4. **Degradation Handling**: If the Jetstream event is delayed beyond a threshold (default 3,000ms), `_syncStatus` transitions to `'indexing_lag'`, allowing UI components to show a graceful "Syncing to network..." indicator without dropping the local record. If the PDS write is rejected, `_syncStatus` transitions to `'failed'` with automatic rollback.
 
 ### 3.4 Pillar 4: Offline Persistence & Optimistic UI Mutations
 * **What Firebase Does**: Maintains a local client-side cache (IndexedDB in the browser, SQLite on mobile). Reads are served from cache; writes immediately update the UI (optimistic update), are queued locally, and sync to the server when network connectivity is restored.
@@ -226,161 +268,171 @@ To build an authentic "Firebase for the AT Protocol", we must rigorously deconst
 * **The ATProto Conflict**: Security in ATProto is cryptographic. A PDS will only commit records signed by the private key belonging to that user's DID document. On the AppView side, the indexer must verify that incoming firehose records were genuinely authored by the claiming DID.
 * **The `skybase` Solution (`skybase-rules`)**: Validates commit signatures against the author's public key extracted from their DID document, verifies author DID ownership, and enforces strict schema validation against bundled ATProto Lexicons.
 
-### 3.8 Pillar 8: Local Emulator Suite & Web Admin Console
+### 3.8 Pillar 8: Local Dev Emulator & Web Admin Console (The Other Half of the Wedge)
 * **What Firebase Does**: Running `firebase emulators:start` spins up local emulators of Auth, Firestore, and Functions on `localhost`, paired with a browser-based Admin Console for inspecting records, users, and logs.
 * **Why Developers Rely on It**: Fast, hermetic local development and automated CI testing without cloud bills or network dependencies.
-* **The ATProto Conflict**: Setting up a local ATProto dev environment typically requires running a local PDS, a local BGS relay, a PLC directory mock, and an OAuth authorization server — a massive barrier for developers.
-* **The `skybase` Solution (`skybase-server`)**: A single, zero-dependency binary executable (PocketBase-style). Running `./skybase-server` spins up:
-  - Embedded SQLite database engine.
-  - Local REST and WebSocket API gateway.
-  - Ingestion consumer with mock PDS and mock Jetstream test modes.
-  - Embedded Web Admin dashboard (bundled directly into the binary via `rust-embed`) allowing developers to explore collections, inspect firehose lag, and test queries in real time.
+* **The ATProto Conflict**: Developing locally on ATProto is notoriously painful. A developer must run a local PDS, a local BGS firehose relay, a PLC directory mock, and an OAuth authorization server — requiring 6+ Docker containers, complex DNS hosts, and hours of setup.
+* **The `skybase` Solution: Single-Binary Local Sandbox (`skybase dev`)**:
+  Running `./skybase dev` (or `npx skybase dev`) starts a complete self-contained ATProto development environment:
+  - **Embedded SQLite WAL Engine**: Zero-configuration local database storing indexed records.
+  - **Local Ingestion Engine**: Connects to real Jetstream, or runs in `--mock` mode.
+  - **Hermetic Mock Relay & Jetstream Replay (`--mock`)**: Generates synthetic commits or replays recorded fixture files so developers can build UI and queries completely offline on a plane or train with zero cloud dependencies.
+  - **Embedded Web Admin Console**: Bundled directly into the single binary via `rust-embed`. Provides a visual collection browser, query tester, firehose stream monitor, and record inspector at `http://localhost:8080/_/admin`.
 
 ---
 
-## 4. Scope & Feature Matrix
+## 4. Scope & Feature Matrix: Tiered Scope Discipline
 
-| Firebase Feature | `skybase` Pillar | Underlying ATProto / Standards Mechanism |
+To prevent "schedule fantasy" while maintaining uncompromising Rust safety invariants (`#![forbid(unsafe_code)]`, zero panics, typed errors), `skybase` strictly phases its feature surface into three concrete tiers:
+
+### 4.1 Tier 1: The Core Wedge (v0.1 MVP — Immediate Implementation Focus)
+*The minimal complete product that solves the genuine, unserved ATProto bottleneck.*
+
+| Component | Target Pillar | Scope & Capabilities in v0.1 |
 | :--- | :--- | :--- |
-| **Firebase Auth** | `skybase-auth` | Powered by `skyauth`: OAuth 2.1, RFC 9449 DPoP, RFC 9126 PAR, RFC 7636 PKCE, DID/Handle resolution, SSRF boundaries. |
-| **Cloud Firestore (Write)** | `skybase-repo` | Direct XRPC writes (`com.atproto.repo.putRecord`, `createRecord`, `applyWrites`) signed into user's PDS MST repository. |
-| **Cloud Firestore (Read/Query)** | `skybase-index` | Embedded Micro-AppView engine. Ingests Jetstream firehose for target NSIDs into SQLite WAL / Postgres; provides relational, indexed, and full-text queries. |
-| **Realtime Subscriptions** | `skybase-events` | WebSocket live-query streams and reactive function hooks triggered off Jetstream record commits with durable cursor tracking. |
-| **Cloud Storage** | `skybase-storage` | PDS blob upload (`com.atproto.repo.uploadBlob`), SHA-256 CID digest calculation, magic byte validation, and optional S3/R2 edge CDN proxying. |
-| **Firebase Security Rules** | `skybase-rules` | Lexicon schema validation, commit signature verification against user DID documents, and author DID access policies. |
-| **Local Emulator / Admin** | `skybase-server` | Single-binary daemon with embedded SQLite, REST / WebSocket endpoints, OpenAPI documentation, and Web Admin dashboard. |
-| **Client SDKs** | `skybase-sdk` | Ergonomic Rust crate + TypeScript / JavaScript client library (`@skybase/client`) for web and mobile frontends. |
+| **Embedded Micro-AppView** | `skybase-index` | Targeted Jetstream ingestion for configured NSIDs; embedded SQLite WAL with canonical `records` table; JSON1 virtual indexes; FTS5 full-text search; sub-millisecond multi-user queries. |
+| **Historical PDS Backfill** | `skybase-index` | Cold-start & downtime recovery via `com.atproto.sync.getRepo` CAR sync before seamless handoff to live Jetstream stream. |
+| **Live Real-Time Queries** | `skybase-events` | WebSocket live-query streaming (`/api/v1/realtime`) with push updates on record commits, updates, and deletes. |
+| **Local Dev Sandbox** | `skybase-server` | Single static binary (`./skybase dev`) with embedded SQLite; `--mock` mode providing offline synthetic Jetstream event replay. |
+| **Web Admin Console** | `skybase-server` | Embedded SPA (`rust-embed`) at `/_/admin` for live collection inspection, query benchmarking, and stream health. |
+| **Zero-Custody Client SDK** | `@skybase/client` | TypeScript SDK linking browser-side `@atproto/oauth-client-browser` writes directly to PDS with `skybase` live query subscriptions and optimistic state reconciliation. |
+
+### 4.2 Tier 2: Backend Automation & Custodial Operations (v0.2)
+*For backend daemons, automated bots, and feed generators that require server-side writes without an active browser session.*
+
+| Component | Target Pillar | Scope & Capabilities in v0.2 |
+| :--- | :--- | :--- |
+| **Server-Side Repo CRUD** | `skybase-repo` | DPoP-signed XRPC calls (`createRecord`, `putRecord`, `deleteRecord`, `applyWrites`) from daemon to PDS. |
+| **Daemon Credential Custody** | `skybase-auth` | Managed OAuth 2.1 lifecycle via `skyauth`; **AES-256-GCM encryption at rest** for refresh tokens; in-memory key zeroization. |
+| **Sovereign Blob Management** | `skybase-storage` | PDS `uploadBlob` client, SHA-256 CID computation, and MIME magic-byte validation. |
+| **Declarative Event Hooks** | `skybase-events` | In-process asynchronous Rust hooks (`skybase.events().on_create(...)`) with durable sequence cursor persistence. |
+
+### 4.3 Tier 3: Post-v1 & Enterprise Extensions (Future Horizon)
+*Architected for, but explicitly out of scope for initial release.*
+
+| Extension | Target Capability | Rationale for Deferral |
+| :--- | :--- | :--- |
+| **Enterprise Database** | PostgreSQL backend adapter | SQLite WAL easily scales to millions of records on a single node; premature distributed DB complexity. |
+| **Embedded Scripting Engine** | QuickJS / Boa JS runtime | HTTP webhooks solve external extensibility cleanly without embedding a JS VM inside the Rust daemon. |
+| **Edge CDN Blob Proxy** | Cloudflare R2 / AWS S3 edge cache | Direct PDS blob URLs are sufficient for early stage apps; CDN caching is an optimization, not a blocker. |
+| **Multi-Node Clustering** | Raft consensus / distributed indexers | Single-binary simplicity is the primary differentiator against complex enterprise infrastructure. |
 
 ---
 
 ## 5. Architectural Blueprint & Data Flow
 
-### 5.1 System Architecture Diagram
+### 5.1 System Architecture Diagram: The Dual Topology Engine
 
 ```mermaid
 flowchart TD
-    subgraph ClientLayer ["Client Applications"]
-        BrowserApp["Web Frontend (React/Vue)"]
-        MobileApp["Mobile App (iOS/Android)"]
-        RustService["Backend Rust Microservice"]
+    subgraph ClientLayer ["Client Applications (Topology A: Zero Custody)"]
+        BrowserApp["Web Frontend (React / Next.js)"]
+        MobileApp["Mobile App (React Native / Swift)"]
+        BrowserAuth["@atproto/oauth-client-browser<br/>(DPoP Keys in IndexedDB/Enclave)"]
+        BrowserApp -.-> BrowserAuth
     end
 
-    subgraph SkybasePlatform ["Skybase Platform (Daemon or Library)"]
-        Gateway["REST / WebSocket API Gateway"]
+    subgraph DaemonLayer ["Server Backend (Topology B: Managed Custody)"]
+        RustDaemon["Automated Bot / Feed Generator"]
+        SkyauthVault["skyauth Token Vault<br/>(AES-256-GCM Encrypted at Rest)"]
+        RustDaemon -.-> SkyauthVault
+    end
+
+    subgraph SkybaseEngine ["Skybase Micro-AppView Engine (Single Static Binary)"]
+        Gateway["REST & WebSocket API Gateway (/api/v1)"]
         
-        subgraph AuthPillar ["skybase-auth (powered by skyauth)"]
-            OAuthClient["AtprotoOAuthClient"]
-            DPoPEngine["DPoP & PKCE Engine"]
-            SessionStore["64-Shard Session Store"]
+        subgraph IngestionPillar ["skybase-index (Micro-AppView Core)"]
+            JetstreamSub["Jetstream Firehose Consumer (Filtered NSIDs)"]
+            BackfillCrawler["PDS Backfill Crawler (com.atproto.sync.getRepo)"]
+            CursorTracker["Monotonic Sequence Cursor (Disk WAL)"]
+            SqliteStore[("Embedded SQLite WAL<br/>(Canonical records + JSON1 + FTS5)")]
+            QueryEngine["High-Speed Query Builder & Indexer"]
         end
         
-        subgraph RepoPillar ["skybase-repo"]
-            XrpcClient["XRPC Repository Client"]
-            LexiconValidator["Lexicon Schema Validator"]
+        subgraph RealtimePillar ["skybase-events"]
+            LiveQueryBroker["WebSocket Live-Query Push Broker"]
+            ReconciliationEngine["Optimistic State Reconciliation Tracker"]
         end
         
-        subgraph IndexPillar ["skybase-index (Micro-AppView)"]
-            JetstreamSub["Jetstream Firehose Consumer"]
-            CursorTracker["Monotonic Cursor Store"]
-            LocalDb[("Embedded SQLite / Postgres Store")]
-            QueryEngine["Expressive Query & FTS Engine"]
-        end
-        
-        subgraph StoragePillar ["skybase-storage"]
-            BlobManager["Blob Upload & CID Verification"]
-            CdnProxy["Edge Cache / Proxy"]
-        end
-        
-        subgraph EventPillar ["skybase-events"]
-            EventDispatcher["Reactive Hook Dispatcher"]
+        subgraph ServerWritePillar ["skybase-repo (Optional Daemon Writes)"]
+            XrpcClient["XRPC Client (DPoP Signed)"]
         end
     end
 
     subgraph AtprotoNetwork ["Decentralized ATProto Ecosystem"]
-        UserPds["User PDS (Host of Sovereign MST)"]
-        Jetstream["Bluesky Jetstream / Firehose Relay"]
-        PlcDirectory["PLC Directory / did:web"]
+        UserPds["User PDS (Authoritative MST Repository)"]
+        JetstreamRelay["Bluesky Jetstream Relay (Global Firehose)"]
+        PlcDir["PLC Directory (did:plc & did:web)"]
     end
 
-    %% Client Interactions
-    BrowserApp -->|REST / WS| Gateway
-    MobileApp -->|REST / WS| Gateway
-    RustService -->|Direct Rust API| SkybasePlatform
-    Gateway --> SkybasePlatform
+    %% Topology A (Zero Custody) Flow: Writes go direct to PDS!
+    BrowserApp -->|1. Direct Sovereign Write (DPoP)| UserPds
+    UserPds -->|2. Broadcast Commit| JetstreamRelay
+    JetstreamRelay -->|3. Stream Filtered NSID Commits| JetstreamSub
+    JetstreamSub --> SqliteStore
+    JetstreamSub --> LiveQueryBroker
+    LiveQueryBroker -->|4. Push Realtime Diffs (WebSocket)| BrowserApp
+    BrowserApp -->|5. High-Speed Reads & FTS| Gateway
+    Gateway --> QueryEngine
+    QueryEngine --> SqliteStore
 
-    %% Auth Flows
-    OAuthClient -->|Resolve DID / Metadata| PlcDirectory
-    OAuthClient -->|PAR & Token Exchange with DPoP| UserPds
-    OAuthClient --> SessionStore
+    %% Topology B (Server Custodial) Flow: Daemon writes
+    RustDaemon --> XrpcClient
+    XrpcClient -->|Server-Signed Write| UserPds
 
-    %% Write Path (Sovereign)
-    XrpcClient -->|Signed XRPC Record Write with DPoP| UserPds
-    
-    %% Ingestion & Read Path
-    UserPds -->|Emits Commit| Jetstream
-    Jetstream -->|WebSocket Events for App Collections| JetstreamSub
-    JetstreamSub --> CursorTracker
-    JetstreamSub --> LocalDb
-    LocalDb --> QueryEngine
-    QueryEngine --> Gateway
-    
-    %% Storage Path
-    BlobManager -->|Upload Blob with DPoP| UserPds
-    BlobManager --> CdnProxy
-    
-    %% Event Triggers
-    JetstreamSub --> EventDispatcher
+    %% Cold Start Backfill
+    BackfillCrawler -->|Historical Sync (CAR export)| UserPds
+    BackfillCrawler --> SqliteStore
 ```
 
-### 5.2 The Sovereign Write & Micro-AppView Read Flow
+### 5.2 The Sovereign Write & Optimistic Reconciliation Flow
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor User as User / Client
-    participant SB as Skybase Engine
+    actor User as User / Client SDK
     participant PDS as User Sovereign PDS
-    participant JS as Jetstream Relay
-    participant DB as Skybase Local AppView
+    participant Relay as Bluesky Relay / Jetstream
+    participant SB as Skybase Micro-AppView
+    participant DB as SQLite WAL Store
 
-    Note over User, DB: 1. Authentication (via skyauth)
-    User->>SB: Authenticate (handle: alice.bsky.social)
-    SB->>PDS: PAR & DPoP OAuth Negotiation
-    PDS-->>SB: DPoP-Bound Access & Refresh Tokens
-    SB-->>User: Session Established
+    Note over User, DB: 1. Optimistic Write Initiation (Client Device)
+    User->>User: Generate deterministic TID (rkey)
+    User->>User: Emit local optimistic state (_syncStatus: "optimistic")
+    
+    Note over User, PDS: 2. Sovereign Direct Write (Zero Skybase Custody)
+    User->>PDS: com.atproto.repo.createRecord (DPoP-signed)
+    PDS->>PDS: Commit record to user's MST
+    PDS-->>User: Ack with CID (commit hash) & AT-URI
+    User->>User: Update state (_syncStatus: "pds_committed")
 
-    Note over User, DB: 2. Sovereign Write Path (PDS)
-    User->>SB: Create Record (e.g. com.example.review)
-    SB->>SB: Validate against Lexicon Schema
-    SB->>PDS: com.atproto.repo.createRecord (DPoP Signed)
-    PDS->>PDS: Append to user's MST repository
-    PDS-->>SB: Success: AT-URI (at://did:plc:.../com.example.review/3k...)
-    SB-->>User: Record Created (Optimistic Ack)
-
-    Note over User, DB: 3. Decentralized Event Ingestion
-    PDS->>JS: Publish commit to network firehose
-    JS->>SB: Jetstream message (filtered by NSID: com.example.review)
-    SB->>DB: Upsert record & update monotonic cursor
-    SB->>SB: Trigger registered on_record_created hooks
-
-    Note over User, DB: 4. Aggregated Read Path (Local AppView)
-    User->>SB: Query (e.g. all reviews for item X, ordered by date)
-    SB->>DB: Sub-millisecond indexed SQL / FTS query
-    DB-->>SB: Return aggregated multi-user results
-    SB-->>User: Paginated JSON Response
+    Note over PDS, SB: 3. Decentralized Firehose Propagation (50-500ms)
+    PDS->>Relay: Publish commit to global firehose
+    Relay->>SB: Jetstream WebSocket message (filtered collection)
+    
+    Note over SB, DB: 4. Embedded Indexing & Realtime Push
+    SB->>DB: Upsert into records table & extract JSON1 virtual indexes
+    SB->>DB: Commit monotonic sequence cursor
+    SB-->>User: WebSocket live-query update (payload + matching TID/CID)
+    
+    Note over User: 5. Client State Reconciliation
+    User->>User: Match incoming TID/CID -> transition to (_syncStatus: "confirmed")
+    Note over User: UI remains perfectly stable throughout with zero flicker!
 ```
 
 ---
 
 ## 6. Detailed Component Specifications
 
-### 6.1 `skybase-auth`: Authentication & Identity
+### 6.1 `skybase-auth`: Authentication, Topologies & The Custody Boundary
 Built directly on top of [`skyauth`]:
-- **Turn-key Integration**: Wraps `skyauth::client::AtprotoOAuthClient` with higher-level application session lifecycle management.
-- **Session Continuity**: Automatic, transparent DPoP access token refresh before expiration.
-- **Token Custody at Rest (Honest Security Boundary)**:
-  - When the daemon acts as a backend client to sign PDS writes on users' behalf, it holds sensitive DPoP private keys and refresh tokens.
-  - To prevent overselling "sovereignty": while the *data records* remain sovereign on user PDSs, the daemon's *access tokens at rest* are encrypted using **AES-256-GCM** with an application master key (`SKYBASE_MASTER_KEY`).
+- **Operating Topologies & Token Custody**:
+  - **Mode A: Zero-Custody Frontend Auth (Default)**: In web and mobile apps, `skybase-auth` is entirely bypassed on the server. Frontends authenticate directly using official `@atproto/oauth-client-browser` or platform keystores. Sensitive private keys and DPoP tokens reside exclusively on the user's client device. `skybase` runs in zero-custody mode, acting solely as an AppView query engine without ever seeing user credentials.
+  - **Mode B: Managed Backend Sessions (Bots, Aggregators, Daemons)**: When a server-side service requires autonomous writes without user presence, `skybase-auth` wraps `skyauth::client::AtprotoOAuthClient` to manage DPoP sessions.
+- **Session Continuity (Mode B)**: Automatic, transparent DPoP access token refresh before expiration with clock-skew tolerance.
+- **Honest Security Boundary: AES-256-GCM Credential Vault**:
+  - In Mode B, the server **is** an OAuth credential custodian. We reject marketing claims that disguise this reality.
+  - To prevent credential leakage from database dumps or disk exfiltration, all refresh tokens and private keys stored at rest are encrypted with **AES-256-GCM** using a master encryption key (`SKYBASE_MASTER_KEY`).
   - In-memory session keys implement `zeroize::Zeroize` on drop.
 - **Multi-Tenant State Store**: 64-shard partitioned memory store for zero-lock contention under concurrency; external Redis / SQL backends marked as `[Post-v1 Extension]`.
 - **Framework Middleware**: Ready-to-use extractors and guards for Axum 0.7, Actix-Web 4, and Tower services.
@@ -434,8 +486,27 @@ Built directly on top of [`skyauth`]:
   ```
 - **Pluggable Enterprise Backend [Post-v1 Extension]**: Optional PostgreSQL backend support for multi-node deployments.
 
-### 6.4 `skybase-events`: Reactive Trigger Pipeline
-- **Declarative Event Hooks**:
+### 6.4 `skybase-events`: Reactive Trigger Pipeline & Realtime Live Queries
+- **Realtime WebSocket Live-Query Protocol (`/api/v1/realtime`)**:
+  - Connect: Client opens a persistent WebSocket connection to `/api/v1/realtime`.
+  - Subscribe: Client submits filter criteria:
+    ```json
+    { "action": "subscribe", "collection": "com.example.review", "filter": { "rating": { "$gte": 4 } } }
+    ```
+  - Push Event Payload: Broadcasts structured JSON events to all active listeners matching collection and query constraints:
+    ```json
+    {
+      "event_type": "create",
+      "did": "did:plc:12345",
+      "collection": "com.example.review",
+      "rkey": "3kxyz...",
+      "cid": "bafyreib...",
+      "seq": 984729184,
+      "record": { "title": "Snow Crash", "rating": 5, "created_at": "2026-09-11T18:00:00Z" }
+    }
+    ```
+  - **Optimistic Reconciliation**: The `@skybase/client` SDK matches the incoming `rkey` and `cid` against pending mutations, automatically transitioning optimistic UI state from `optimistic` to `confirmed`.
+- **Declarative Rust Event Hooks**:
   ```rust
   skybase.events().on_create("com.example.chat.message", |event| async move {
       info!("New chat message from {}: {}", event.did, event.record.text);
@@ -653,48 +724,61 @@ const unsubscribe = skybase.collection('app.bsky.feed.post')
    - SQLite WAL (Write-Ahead Logging) journaling ensures index consistency without corruption under abrupt power failure.
 8. **100% Documentation Coverage**:
    - All public APIs, types, functions, and modules are thoroughly documented. Bare URLs are enclosed in angle brackets (`<https://...>`).
+9. **Reconciling Scope vs. The High Quality Bar (Eliminating the "Schedule Fantasy")**:
+   - External review insight: *"AGENTS.md inherits formal-verification/80%-coverage/no-panic standards from skyauth. Applying it to 8 pillars + TS SDK + admin UI + Postgres + scripting in 12+ weeks is a schedule fantasy. Scope or bar — pick one."*
+   - `skybase` makes the deliberate choice: **We preserve the uncompromising safety bar, and ruthlessly narrow initial scope.**
+   - The strict quality gates (`#![forbid(unsafe_code)]`, zero panics, typed `SkybaseError`, sharded concurrency, clock-warp safety) apply strictly to the **Tier 1 Core Wedge** (Micro-AppView engine + local dev sandbox).
+   - Peripheral expansions (Postgres multi-node clustering, embedded QuickJS scripting, edge S3/R2 CDN cache) are classified as Tier 3 post-v1 extensions rather than compromising on engineering rigor.
 
 ---
 
 ## 10. Implementation Roadmap & Milestones
 
-### Phase 1: Foundation & Core Infrastructure (Weeks 1–3)
-- [x] Repository initialization (`#![forbid(unsafe_code)]`, strict lints, typed errors).
-- [x] Integrate `skyauth` dependency and configure `SkybaseConfig`.
-- [x] Establish architectural blueprint and formal `AGENTS.md` guidelines.
-- [ ] Implement `skybase-auth` high-level session coordinator and auto-refresh worker.
-- [ ] Implement `skybase-repo` XRPC client (`createRecord`, `putRecord`, `deleteRecord`).
-- [ ] Comprehensive unit and mock integration test suites.
+### Phase 1: Foundation & Core Configuration (Completed)
+- [x] Standalone repository initialization (`#![forbid(unsafe_code)]`, strict lints, typed errors).
+- [x] Integrate `skyauth` dependency and implement `SkybaseConfig` with validation.
+- [x] Establish architectural blueprint (`PRD.md`), developer quickstart (`README.md`), and formal `AGENTS.md` guidelines.
+- [x] Create public GitHub repository (`https://github.com/mike10010100/skybase`).
 
-### Phase 1.5: The Thin Vertical Slice (De-Risking the Core Thesis)
-> *Priority Objective: Rather than building 8 pillars wide, cut a complete end-to-end slice across one single collection (`app.bsky.feed.post` or custom test NSID). Prove the dual-path thesis with running code and hermetic integration tests before expanding.*
+### Phase 1.5: The Thin Vertical Slice (De-Risking the Core Thesis — In Progress)
+> *Priority Objective: Rather than attempting to build 8 pillars wide, cut a complete end-to-end vertical slice across one single collection (`app.bsky.feed.post` or custom test NSID). Prove the dual-path thesis with running code and hermetic integration tests before expanding.*
 - [ ] Implement canonical SQLite `records` table with JSON1 extraction and FTS5 search.
 - [ ] Build minimal Jetstream WebSocket consumer filtering for the single target collection.
 - [ ] Build minimal `createRecord` client using `skyauth` DPoP signing.
 - [ ] Execute hermetic integration test:
-  $$\text{DPoP Login} \longrightarrow \text{createRecord (PDS)} \longrightarrow \text{Jetstream Ingest} \longrightarrow \text{SQLite Upsert} \longrightarrow \text{.where().limit() Query} \longrightarrow \text{onSnapshot Event}$$
+  $$\text{DPoP Login} \longrightarrow \text{createRecord (PDS)} \longrightarrow \text{Jetstream Ingest} \longrightarrow \text{SQLite Upsert} \longrightarrow \text{.where().limit() Query} \longrightarrow \text{WebSocket Event}$$
 - [ ] Measure and record empirical baseline benchmarks (ingest throughput, memory usage, query latency) with Criterion.
 
-### Phase 2: Production Ingestion & Micro-AppView Engine (Weeks 4–6)
-- [ ] Implement historical backfill crawler (`com.atproto.sync.getRepo` / CAR sync) for cold starts.
-- [ ] Implement monotonic cursor tracking with disk persistence.
-- [ ] Generalize fluent query builder for arbitrary Lexicons.
+### Phase 2: Production Micro-AppView & Local Dev Sandbox (Tier 1 Core Wedge)
+- [ ] Implement dual-stage ingestion: historical backfill crawler (`com.atproto.sync.getRepo` / CAR sync) with seamless handoff to live Jetstream stream.
+- [ ] Monotonic cursor tracking with durable disk WAL persistence.
+- [ ] Hermetic local dev sandbox (`./skybase dev --mock`) with synthetic Jetstream event replay.
+- [ ] Axum 0.7 REST and WebSocket live-query gateway (`/api/v1/collections/*`, `/api/v1/realtime`).
+- [ ] Embedded single-binary Web Admin console (`rust-embed`) at `http://localhost:8080/_/admin`.
 
-### Phase 3: Blob Storage & Reactive Trigger Pipeline (Weeks 7–8)
-- [ ] Implement `skybase-storage` PDS blob upload with SHA-256 CID computation.
-- [ ] Add MIME sniffing defense and magic-byte validation.
-- [ ] Build local LRU disk cache proxy for blobs.
-- [ ] Implement declarative event hooks (`on_create`, `on_delete`).
+### Phase 3: Zero-Custody Client SDK & Community Feedback Loop
+- [ ] Implement `@skybase/client` TypeScript SDK linking browser-side `@atproto/oauth-client-browser` writes to Skybase live queries.
+- [ ] Implement Optimistic State Reconciliation Protocol (`isPending`, `isOptimistic`, `isLagging`) in TypeScript client and React hooks (`@skybase/react`).
+- [ ] Record a 5-minute video demo: "Login → Write sovereign record to PDS → Instant local AppView live query".
+- [ ] Targeted community review: Bluesky/ATProto developer Discord, atproto Discourse, and Bluesky network thread with targeted questions.
 
-### Phase 4: Standalone Daemon (`skybase-server`) & Admin Dashboard (Weeks 9–11)
-- [ ] Axum 0.7 HTTP and WebSocket gateway routing.
-- [ ] REST API endpoints for auth, collection CRUD, and blob uploads.
-- [ ] Real-time WebSocket live-query subscriptions (`/api/v1/realtime`).
-- [ ] Single-binary embedded Web Admin dashboard (HTML/Tailwind/Vue/React) via `rust-embed`.
+### Phase 4: Backend Automation & Custodial Operations (Tier 2 Expansion)
+- [ ] Implement `skybase-auth` managed session coordinator for autonomous daemons and bots.
+- [ ] Implement **AES-256-GCM encryption at rest** for daemon-held DPoP refresh tokens (`SKYBASE_MASTER_KEY`).
+- [ ] Implement `skybase-repo` server-side XRPC writes (`createRecord`, `putRecord`, `deleteRecord`, `applyWrites`).
+- [ ] Implement `skybase-storage` PDS blob upload (`uploadBlob`), SHA-256 CID computation, and MIME header validation.
+- [ ] Implement declarative in-process Rust event hooks (`skybase.events().on_create(...)`).
 
-### Phase 5: Client SDKs & Production Verification (Weeks 12+)
-- [ ] Publish `@skybase/client` TypeScript / JavaScript SDK for npm.
-- [ ] React hooks package (`@skybase/react`: `useSkybaseAuth`, `useCollection`).
-- [ ] Security audit, mutation testing sweep, and cargo-deny compliance scan.
-- [ ] Documentation website and reference starter templates (Decentralized Blog, Micro-Feed, Chat).
+### Phase 5: Production Hardening, Compliance & Reference Apps
+- [ ] Security audit, mutation testing sweep, and `cargo deny check` policy enforcement.
+- [ ] Reference application templates:
+  - Decentralized Book Reviews (`com.example.book.review`)
+  - Real-time Micro-Chat (`com.example.chat.message`)
+  - Public Polling & Leaderboards (`com.example.poll`)
+- [ ] Documentation site and npm release of `@skybase/client`.
+
+### Post-v1 Horizon (Tier 3 Extensions)
+- [ ] Pluggable PostgreSQL backend adapter for multi-node deployments.
+- [ ] Edge media CDN proxy with Cloudflare R2 / AWS S3 caching.
+- [ ] Embedded lightweight JS/WASM scripting runtime for custom triggers.
 
