@@ -196,11 +196,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   - Comprehensive PRD, handover guide (`AGENTS.md`), and dual-licensing.
 - [x] **Phase 1.5: The Vertical Slice Wedge (Completed)**
   - Proven single end-to-end loop: DPoP login → PDS write → Jetstream ingest → SQLite WAL upsert → JSON1 query → live query broadcast notification.
-  - Canonical `records` SQLite schema with JSON1 extraction and FTS5 search (`skybase::index`).
+  - Canonical `records` SQLite schema with JSON1 extraction and structured query builder (`skybase::index`; FTS5 full-text indexing scheduled for Phase 2).
   - Resilient WebSocket Jetstream consumer with edge filtering, monotonic cursor, and mock test emitter (`skybase::ingest`).
   - Sovereign PDS write client with DPoP proof signing and automatic nonce retry (`skybase::repo`).
-  - Hermetic integration test suite (`tests/vertical_slice_tests.rs`) with 261 passing unit & integration tests.
+  - Hermetic integration test suite (`tests/vertical_slice_tests.rs`) and 12 test suites with 258 passing unit, integration, and stress tests.
 - [ ] **Phase 2: Micro-AppView Ingestion & Historical Backfill**
+  - FTS5 contentless/external-content full-text search integration.
   - Multi-collection filtering and disk-backed cursor persistence.
   - Historical CAR sync crawler (`com.atproto.sync.getRepo`).
   - Dynamic index generation from Lexicon schema manifests.

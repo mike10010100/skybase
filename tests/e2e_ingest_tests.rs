@@ -4,17 +4,15 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
 
-mod common;
-
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::{
-    ChangeNotification, CommitOperation, JetstreamCommit, MockJetstreamServer, RecordInput,
-    TestBackoffManager, TestCursorTracker, TestRecordStore,
-};
 use futures_util::StreamExt;
 use serde_json::json;
+use skybase::index::{ChangeNotification, RecordInput, RecordStore};
+use skybase::ingest::{
+    BackoffManager, CommitOperation, CursorTracker, JetstreamCommit, MockJetstreamServer,
+};
 use tokio_tungstenite::connect_async;
 
 // ============================================================================
@@ -91,7 +89,7 @@ async fn test_tier1_f02_commit_event_emission_and_frame_deserialization() {
 
 #[tokio::test]
 async fn test_tier1_f03_monotonic_cursor_tracker_progression() {
-    let tracker = TestCursorTracker::new(100);
+    let tracker = CursorTracker::new(100);
     assert_eq!(tracker.get(), 100);
 
     // Advancing cursor succeeds
@@ -131,15 +129,15 @@ async fn test_tier1_f04_heartbeat_timestamp_advancement() {
     assert_eq!(parsed["time_us"], heartbeat_time);
     assert!(parsed.get("commit").is_none());
 
-    let tracker = TestCursorTracker::new(0);
+    let tracker = CursorTracker::new(0);
     tracker.update(parsed["time_us"].as_u64().unwrap());
     assert_eq!(tracker.get(), heartbeat_time);
 }
 
 #[tokio::test]
 async fn test_tier1_f05_ingest_synchronization_to_sqlite_storage() {
-    let store = TestRecordStore::open_in_memory().expect("open failed");
-    let tracker = Arc::new(TestCursorTracker::new(0));
+    let store = RecordStore::open_in_memory().expect("open failed");
+    let tracker = Arc::new(CursorTracker::new(0));
 
     // Simulate ingestion handler for commit
     let commit = JetstreamCommit {
@@ -183,7 +181,7 @@ async fn test_tier1_f05_ingest_synchronization_to_sqlite_storage() {
 
 #[tokio::test]
 async fn test_tier2_b01_out_of_order_commit_timestamps_and_clock_skew() {
-    let tracker = TestCursorTracker::new(1000);
+    let tracker = CursorTracker::new(1000);
 
     // Sequence of timestamps with out-of-order arrivals
     let incoming_timestamps = [1500, 1200, 1800, 1750, 1900, 1600, 2000];
@@ -250,9 +248,9 @@ async fn test_tier2_b02_malformed_and_unparseable_json_frames() {
 
 #[test]
 fn test_tier2_b03_exponential_backoff_jitter_and_reset() {
-    let mut backoff = TestBackoffManager::new(Duration::from_millis(500), Duration::from_secs(30));
+    let mut backoff = BackoffManager::new(Duration::from_millis(500), Duration::from_secs(30));
 
-    assert_eq!(backoff.current_delay, Duration::from_millis(500));
+    assert_eq!(backoff.current_delay(), Duration::from_millis(500));
 
     // Progression of backoff delays
     let delay1 = backoff.next_backoff();
@@ -273,13 +271,13 @@ fn test_tier2_b03_exponential_backoff_jitter_and_reset() {
 
     // Reset restores initial delay
     backoff.reset();
-    assert_eq!(backoff.current_delay, Duration::from_millis(500));
-    assert_eq!(backoff.attempts, 0);
+    assert_eq!(backoff.current_delay(), Duration::from_millis(500));
+    assert_eq!(backoff.attempts(), 0);
 }
 
 #[tokio::test]
 async fn test_tier2_b04_collection_filtering_ignores_unwanted_collections() {
-    let store = TestRecordStore::open_in_memory().expect("open failed");
+    let store = RecordStore::open_in_memory().expect("open failed");
     let wanted_collections = ["app.bsky.feed.post".to_string()];
 
     let commits = vec![
@@ -335,7 +333,7 @@ async fn test_tier2_b04_collection_filtering_ignores_unwanted_collections() {
 
 #[tokio::test]
 async fn test_tier3_p01_ingest_mutation_lifecycle_create_update_delete() {
-    let store = TestRecordStore::open_in_memory().expect("open failed");
+    let store = RecordStore::open_in_memory().expect("open failed");
     let mut sub = store.subscribe();
 
     let did = "did:plc:lifecycle";
@@ -396,6 +394,7 @@ async fn test_tier3_p01_ingest_mutation_lifecycle_create_update_delete() {
     }
 
     // Verify storage reflects soft delete
-    let final_record = store.get_record(&uri).unwrap().unwrap();
+    assert!(store.get_record(&uri).unwrap().is_none());
+    let final_record = store.get_record_including_deleted(&uri).unwrap().unwrap();
     assert!(final_record.is_deleted);
 }

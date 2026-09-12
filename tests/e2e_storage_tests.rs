@@ -4,10 +4,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
 
-mod common;
-
-use common::{ChangeNotification, QueryOp, RecordInput, SortDirection, TestRecordStore};
 use serde_json::json;
+use skybase::index::{ChangeNotification, QueryOp, RecordInput, RecordStore, SortDirection};
 
 // ============================================================================
 // Tier 1: Feature Coverage (Canonical Schema, Storage CRUD, QueryBuilder, Bus)
@@ -18,60 +16,57 @@ fn test_tier1_f01_canonical_schema_and_wal_pragmas() {
     let temp_dir = tempfile::tempdir().expect("tempdir creation failed");
     let db_path = temp_dir.path().join("skybase_test.db");
 
-    let store = TestRecordStore::open_file_backed(&db_path).expect("Failed to open file-backed DB");
-    let conn = store.raw_connection();
-    let locked = conn.lock();
+    let store = RecordStore::open_file_backed(&db_path).expect("Failed to open file-backed DB");
+    store
+        .with_conn(|conn| {
+            // Verify journal mode is WAL
+            let journal_mode: String =
+                conn.query_row("PRAGMA journal_mode;", [], |row| row.get(0))?;
+            assert_eq!(journal_mode.to_lowercase(), "wal");
 
-    // Verify journal mode is WAL
-    let journal_mode: String = locked
-        .query_row("PRAGMA journal_mode;", [], |row| row.get(0))
-        .expect("PRAGMA journal_mode failed");
-    assert_eq!(journal_mode.to_lowercase(), "wal");
+            // Verify table structure
+            let mut stmt = conn.prepare("PRAGMA table_info(records);")?;
+            let cols: Vec<String> = stmt
+                .query_map([], |row| row.get(1))?
+                .map(|r| r.expect("col read failed"))
+                .collect();
 
-    // Verify table structure
-    let mut stmt = locked
-        .prepare("PRAGMA table_info(records);")
-        .expect("table_info failed");
-    let cols: Vec<String> = stmt
-        .query_map([], |row| row.get(1))
-        .expect("query_map failed")
-        .map(|r| r.expect("col read failed"))
-        .collect();
-
-    assert!(cols.contains(&"uri".to_string()));
-    assert!(cols.contains(&"cid".to_string()));
-    assert!(cols.contains(&"did".to_string()));
-    assert!(cols.contains(&"collection".to_string()));
-    assert!(cols.contains(&"rkey".to_string()));
-    assert!(cols.contains(&"record_json".to_string()));
-    assert!(cols.contains(&"indexed_at".to_string()));
-    assert!(cols.contains(&"is_deleted".to_string()));
+            assert!(cols.contains(&"uri".to_string()));
+            assert!(cols.contains(&"cid".to_string()));
+            assert!(cols.contains(&"did".to_string()));
+            assert!(cols.contains(&"collection".to_string()));
+            assert!(cols.contains(&"rkey".to_string()));
+            assert!(cols.contains(&"record_json".to_string()));
+            assert!(cols.contains(&"indexed_at".to_string()));
+            assert!(cols.contains(&"is_deleted".to_string()));
+            Ok(())
+        })
+        .expect("PRAGMA inspection failed");
 }
 
 #[test]
 fn test_tier1_f02_primary_key_uniqueness_and_indexes() {
-    let store = TestRecordStore::open_in_memory().expect("in-memory DB failed");
-    let conn = store.raw_connection();
-    let locked = conn.lock();
+    let store = RecordStore::open_in_memory().expect("in-memory DB failed");
+    store
+        .with_conn(|conn| {
+            // Verify secondary indexes exist
+            let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type = 'index';")?;
+            let indexes: Vec<String> = stmt
+                .query_map([], |row| row.get(0))?
+                .map(|r| r.expect("index name read failed"))
+                .collect();
 
-    // Verify secondary indexes exist
-    let mut stmt = locked
-        .prepare("SELECT name FROM sqlite_master WHERE type = 'index';")
-        .expect("index query failed");
-    let indexes: Vec<String> = stmt
-        .query_map([], |row| row.get(0))
-        .expect("query_map failed")
-        .map(|r| r.expect("index name read failed"))
-        .collect();
-
-    assert!(indexes.contains(&"idx_records_collection".to_string()));
-    assert!(indexes.contains(&"idx_records_did".to_string()));
-    assert!(indexes.contains(&"idx_records_indexed_at".to_string()));
+            assert!(indexes.contains(&"idx_records_collection".to_string()));
+            assert!(indexes.contains(&"idx_records_did".to_string()));
+            assert!(indexes.contains(&"idx_records_indexed_at".to_string()));
+            Ok(())
+        })
+        .expect("index inspection failed");
 }
 
 #[test]
 fn test_tier1_f03_atomic_upsert_and_retrieval() {
-    let store = TestRecordStore::open_in_memory().expect("store open failed");
+    let store = RecordStore::open_in_memory().expect("store open failed");
 
     let record = RecordInput {
         uri: "at://did:plc:alice/app.bsky.feed.post/post1".to_string(),
@@ -101,7 +96,7 @@ fn test_tier1_f03_atomic_upsert_and_retrieval() {
 
 #[test]
 fn test_tier1_f04_soft_delete_and_hard_delete() {
-    let store = TestRecordStore::open_in_memory().expect("store open failed");
+    let store = RecordStore::open_in_memory().expect("store open failed");
     let uri = "at://did:plc:alice/app.bsky.feed.post/del_target";
 
     let record = RecordInput {
@@ -117,7 +112,11 @@ fn test_tier1_f04_soft_delete_and_hard_delete() {
 
     // Soft delete
     store.soft_delete_record(uri).expect("soft delete failed");
-    let fetched_soft = store.get_record(uri).expect("get failed").expect("missing");
+    assert!(store.get_record(uri).expect("get failed").is_none());
+    let fetched_soft = store
+        .get_record_including_deleted(uri)
+        .expect("get failed")
+        .expect("missing");
     assert!(fetched_soft.is_deleted);
 
     // Hard delete
@@ -128,7 +127,7 @@ fn test_tier1_f04_soft_delete_and_hard_delete() {
 
 #[test]
 fn test_tier1_f05_query_builder_collection_and_did_filter() {
-    let store = TestRecordStore::open_in_memory().expect("store open failed");
+    let store = RecordStore::open_in_memory().expect("store open failed");
 
     store
         .upsert_record(&RecordInput {
@@ -189,7 +188,7 @@ fn test_tier1_f05_query_builder_collection_and_did_filter() {
 
 #[test]
 fn test_tier1_f06_query_builder_json1_operators() {
-    let store = TestRecordStore::open_in_memory().expect("store open failed");
+    let store = RecordStore::open_in_memory().expect("store open failed");
 
     for i in 1..=5 {
         store
@@ -238,7 +237,7 @@ fn test_tier1_f06_query_builder_json1_operators() {
 
 #[test]
 fn test_tier1_f07_query_builder_ordering_and_pagination() {
-    let store = TestRecordStore::open_in_memory().expect("store open failed");
+    let store = RecordStore::open_in_memory().expect("store open failed");
 
     for i in 1..=10 {
         store
@@ -271,7 +270,7 @@ fn test_tier1_f07_query_builder_ordering_and_pagination() {
 
 #[test]
 fn test_tier1_f08_broadcast_bus_subscription_and_delivery() {
-    let store = TestRecordStore::open_in_memory().expect("store open failed");
+    let store = RecordStore::open_in_memory().expect("store open failed");
     let mut rx1 = store.subscribe();
     let mut rx2 = store.subscribe();
 
@@ -331,7 +330,7 @@ fn test_tier1_f08_broadcast_bus_subscription_and_delivery() {
 
 #[test]
 fn test_tier2_b01_empty_record_json_and_null_fields() {
-    let store = TestRecordStore::open_in_memory().expect("store open failed");
+    let store = RecordStore::open_in_memory().expect("store open failed");
 
     let record = RecordInput {
         uri: "at://did:plc:user/empty.col/1".to_string(),
@@ -361,7 +360,7 @@ fn test_tier2_b01_empty_record_json_and_null_fields() {
 
 #[test]
 fn test_tier2_b02_deeply_nested_json_extraction() {
-    let store = TestRecordStore::open_in_memory().expect("store open failed");
+    let store = RecordStore::open_in_memory().expect("store open failed");
 
     let nested_json = json!({
         "level1": {
@@ -407,7 +406,7 @@ fn test_tier2_b02_deeply_nested_json_extraction() {
 
 #[test]
 fn test_tier2_b03_special_characters_unicode_and_escaping() {
-    let store = TestRecordStore::open_in_memory().expect("store open failed");
+    let store = RecordStore::open_in_memory().expect("store open failed");
 
     let special_text = "Emoji 🚀 Test • 中文 • 日本語 • 한국어 • Quotes \" ' ` • Line\nBreak\tTab";
     let special_rkey = "rkey_with-hyphen.dot~tilde_underscore%20";
@@ -436,7 +435,7 @@ fn test_tier2_b03_special_characters_unicode_and_escaping() {
 
 #[test]
 fn test_tier2_b04_sql_injection_defense_in_json_paths_and_values() {
-    let store = TestRecordStore::open_in_memory().expect("store open failed");
+    let store = RecordStore::open_in_memory().expect("store open failed");
 
     store
         .upsert_record(&RecordInput {
@@ -479,7 +478,7 @@ fn test_tier2_b04_sql_injection_defense_in_json_paths_and_values() {
 
 #[test]
 fn test_tier2_b05_pagination_boundaries_limit_zero_and_offset_overflow() {
-    let store = TestRecordStore::open_in_memory().expect("store open failed");
+    let store = RecordStore::open_in_memory().expect("store open failed");
 
     for i in 1..=3 {
         store
@@ -514,7 +513,7 @@ fn test_tier2_b05_pagination_boundaries_limit_zero_and_offset_overflow() {
 
 #[test]
 fn test_tier2_b06_soft_deleted_record_resurrection_on_upsert() {
-    let store = TestRecordStore::open_in_memory().expect("store open failed");
+    let store = RecordStore::open_in_memory().expect("store open failed");
     let uri = "at://did:plc:user/resurrect.col/item1";
 
     let initial = RecordInput {
@@ -530,7 +529,11 @@ fn test_tier2_b06_soft_deleted_record_resurrection_on_upsert() {
 
     // Soft delete
     store.soft_delete_record(uri).expect("soft delete failed");
-    let soft_del = store.get_record(uri).expect("get failed").expect("missing");
+    assert!(store.get_record(uri).expect("get failed").is_none());
+    let soft_del = store
+        .get_record_including_deleted(uri)
+        .expect("get failed")
+        .expect("missing");
     assert!(soft_del.is_deleted);
 
     // Subsequent upsert clears is_deleted back to 0
@@ -559,7 +562,7 @@ fn test_tier2_b06_soft_deleted_record_resurrection_on_upsert() {
 
 #[test]
 fn test_tier3_p01_storage_upsert_query_and_broadcast_coordination() {
-    let store = TestRecordStore::open_in_memory().expect("store open failed");
+    let store = RecordStore::open_in_memory().expect("store open failed");
     let mut sub = store.subscribe();
 
     let record = RecordInput {
@@ -595,7 +598,7 @@ fn test_tier3_p01_storage_upsert_query_and_broadcast_coordination() {
 
 #[test]
 fn test_tier3_p02_soft_delete_query_filtering_and_include_deleted_toggle() {
-    let store = TestRecordStore::open_in_memory().expect("store open failed");
+    let store = RecordStore::open_in_memory().expect("store open failed");
 
     store
         .upsert_record(&RecordInput {

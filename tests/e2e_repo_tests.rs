@@ -6,8 +6,17 @@
 
 mod common;
 
-use common::{MockPdsServer, TestPdsRepoClient};
+use common::MockPdsServer;
 use serde_json::json;
+use skybase::repo::PdsRepoClient;
+
+fn create_client(
+    endpoint: impl Into<String>,
+    did: impl Into<String>,
+    token: impl Into<String>,
+) -> PdsRepoClient {
+    PdsRepoClient::from_credentials(endpoint, did, token).expect("client creation failed")
+}
 
 // ============================================================================
 // Tier 1: Feature Coverage (PDS Client, createRecord, deleteRecord, DPoP)
@@ -19,7 +28,7 @@ async fn test_tier1_f01_pds_client_create_record_with_explicit_rkey() {
     let did = "did:plc:alice123";
     let token = "test_dpop_access_token_xyz";
 
-    let client = TestPdsRepoClient::new(mock_pds.uri(), did, token);
+    let client = create_client(mock_pds.uri(), did, token);
 
     let post_record = json!({
         "$type": "app.bsky.feed.post",
@@ -42,7 +51,7 @@ async fn test_tier1_f02_pds_client_create_record_with_generated_rkey() {
     let did = "did:plc:bob456";
     let token = "test_token_bob";
 
-    let client = TestPdsRepoClient::new(mock_pds.uri(), did, token);
+    let client = create_client(mock_pds.uri(), did, token);
 
     let like_record = json!({
         "$type": "app.bsky.feed.like",
@@ -70,7 +79,7 @@ async fn test_tier1_f03_pds_client_delete_record() {
     let did = "did:plc:charlie789";
     let token = "test_token_charlie";
 
-    let client = TestPdsRepoClient::new(mock_pds.uri(), did, token);
+    let client = create_client(mock_pds.uri(), did, token);
 
     let del_result = client
         .delete_record("app.bsky.feed.post", "post_to_delete")
@@ -82,7 +91,7 @@ async fn test_tier1_f03_pds_client_delete_record() {
 #[tokio::test]
 async fn test_tier1_f04_dpop_proof_generation_and_headers() {
     let mock_pds = MockPdsServer::start().await;
-    let client = TestPdsRepoClient::new(mock_pds.uri(), "did:plc:tester", "token_val");
+    let client = create_client(mock_pds.uri(), "did:plc:tester", "token_val");
 
     // createRecord sends DPoP proof and Authorization: DPoP token headers
     // MockPdsServer requires both headers; if missing, wiremock returns 404
@@ -104,7 +113,7 @@ async fn test_tier1_f04_dpop_proof_generation_and_headers() {
 #[tokio::test]
 async fn test_tier1_f05_custom_nsid_collections_and_schemas() {
     let mock_pds = MockPdsServer::start().await;
-    let client = TestPdsRepoClient::new(mock_pds.uri(), "did:plc:custom", "token_custom");
+    let client = create_client(mock_pds.uri(), "did:plc:custom", "token_custom");
 
     let custom_record = json!({
         "venue": "Coffee Shop",
@@ -135,7 +144,7 @@ async fn test_tier1_f05_custom_nsid_collections_and_schemas() {
 #[tokio::test]
 async fn test_tier2_b01_dpop_nonce_challenge_automatic_retry() {
     let mock_pds = MockPdsServer::start().await;
-    let client = TestPdsRepoClient::new(mock_pds.uri(), "did:plc:nonce_user", "nonce_token");
+    let client = create_client(mock_pds.uri(), "did:plc:nonce_user", "nonce_token");
 
     // Mount one-time 401 use_dpop_nonce challenge
     let challenge_nonce = "dpop_nonce_challenge_1234567890";
@@ -161,7 +170,7 @@ async fn test_tier2_b01_dpop_nonce_challenge_automatic_retry() {
 #[tokio::test]
 async fn test_tier2_b02_complex_payload_serialization() {
     let mock_pds = MockPdsServer::start().await;
-    let client = TestPdsRepoClient::new(mock_pds.uri(), "did:plc:complex", "token_complex");
+    let client = create_client(mock_pds.uri(), "did:plc:complex", "token_complex");
 
     let complex_payload = json!({
         "unicode": "🎉 Unicode • 🚀 Rocket • 汉语 / 漢語 • 日本語 • العربية",
@@ -192,7 +201,7 @@ async fn test_tier2_b02_complex_payload_serialization() {
 async fn test_tier2_b03_unreachable_endpoint_network_error() {
     // Port 1 is reserved / unreachable on loopback
     let dead_endpoint = "http://127.0.0.1:1";
-    let client = TestPdsRepoClient::new(dead_endpoint, "did:plc:fail", "token");
+    let client = create_client(dead_endpoint, "did:plc:fail", "token");
 
     let res = client
         .create_record("app.bsky.feed.post", Some("1"), &json!({}), false)
@@ -218,7 +227,7 @@ async fn test_tier3_p01_pds_write_lifecycle_create_and_delete() {
     let did = "did:plc:full_cycle";
     let token = "token_cycle";
 
-    let client = TestPdsRepoClient::new(mock_pds.uri(), did, token);
+    let client = create_client(mock_pds.uri(), did, token);
 
     // 1. Create record
     let create_res = client

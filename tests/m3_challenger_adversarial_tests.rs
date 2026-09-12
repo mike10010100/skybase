@@ -746,14 +746,18 @@ async fn test_adv_success_body_giant_response_bounded() {
         )
         .await;
 
-    // MAX_SUCCESS_BODY_BYTES is 1 MB. A 5 MB payload gets truncated at 1 MB,
-    // which results in broken JSON and fails closed with a serialization error
+    // MAX_SUCCESS_BODY_BYTES is 1 MB. A 5 MB payload exceeds 1 MB,
+    // which fails closed with an explicit bounded limit error or serialization error
     // instead of accumulating unbounded memory.
     assert!(
         res.is_err(),
-        "Giant 5MB response truncated at 1MB must fail closed with decode error"
+        "Giant 5MB response exceeding 1MB must fail closed"
     );
-    assert!(matches!(res.unwrap_err(), SkybaseError::Serialization(_)));
+    let err = res.unwrap_err();
+    assert!(
+        matches!(err, SkybaseError::Repo(_) | SkybaseError::Serialization(_)),
+        "Expected Repo limit error or Serialization error, got: {err:?}"
+    );
 }
 
 #[tokio::test]
@@ -793,7 +797,7 @@ async fn test_adv_success_body_missing_fields_fails_safely() {
         );
         let err_msg = res.unwrap_err().to_string();
         assert!(
-            err_msg.contains("Missing 'uri'") || err_msg.contains("Missing 'cid'"),
+            err_msg.contains("'uri'") || err_msg.contains("'cid'"),
             "Error must specify missing field: {err_msg}"
         );
     }

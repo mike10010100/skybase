@@ -12,13 +12,15 @@ use crate::index::{RecordInput, RecordStore};
 
 /// Normalizes a Jetstream microsecond timestamp into seconds if needed.
 ///
-/// If `time_us` exceeds $10^{12}$ (representing a microsecond epoch timestamp),
-/// it is divided by 1,000,000 to convert to canonical Unix epoch seconds.
-/// Smaller or synthetic timestamps (e.g., in unit tests) are preserved directly.
+/// Preserves or normalizes timestamps into canonical microseconds (`time_us`).
+///
+/// In ATProto Jetstream, event timestamps are natively microsecond precision.
+/// If a non-zero timestamp is provided in seconds (< 10^11), it is scaled to microseconds.
+/// Microsecond values (>= 10^11) are preserved directly with full sub-second fidelity.
 #[must_use]
 pub const fn normalize_indexed_at(time_us: u64) -> u64 {
-    if time_us > 1_000_000_000_000 {
-        time_us / 1_000_000
+    if time_us > 0 && time_us < 100_000_000_000 {
+        time_us.saturating_mul(1_000_000)
     } else {
         time_us
     }
@@ -335,20 +337,10 @@ pub fn sync_commit_to_store(store: &RecordStore, commit: &JetstreamCommit) -> Re
 
     match commit.operation {
         CommitOperation::Create | CommitOperation::Update => {
-            let record_json = commit
-                .record
-                .clone()
-                .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
-            let cid = commit.cid.clone().unwrap_or_default();
-
-            let input = RecordInput {
-                uri,
-                cid,
-                did: commit.did.clone(),
-                collection: commit.collection.clone(),
-                rkey: commit.rkey.clone(),
-                record_json,
-                indexed_at: normalize_indexed_at(commit.time_us),
+            let Some(input) = commit.to_record_input(None) else {
+                return Err(crate::error::SkybaseError::Index(format!(
+                    "Missing record payload for commit '{uri}'"
+                )));
             };
 
             store.upsert_record(&input)?;
@@ -414,7 +406,7 @@ mod tests {
                 assert_eq!(c.cid.as_deref(), Some("bafyrei1"));
                 assert_eq!(c.uri(), "at://did:plc:alice/app.bsky.feed.post/post1");
                 let input = c.to_record_input(None).expect("to record input");
-                assert_eq!(input.indexed_at, 1710000000);
+                assert_eq!(input.indexed_at, 1710000000123456);
             }
             _ => panic!("Expected commit event"),
         }

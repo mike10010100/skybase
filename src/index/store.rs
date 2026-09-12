@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
@@ -166,6 +165,14 @@ impl RecordStore {
         Self::with_config(config)
     }
 
+    /// Opens or creates a persistent SQLite record store at the given path (alias for [`RecordStore::open`]).
+    ///
+    /// # Errors
+    /// Returns [`SkybaseError::Storage`] if SQLite fails to open the database file.
+    pub fn open_file_backed(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open(path)
+    }
+
     /// Opens an isolated in-memory SQLite record store (ideal for unit and integration testing).
     ///
     /// # Errors
@@ -242,7 +249,10 @@ impl RecordStore {
     }
 
     /// Inserts or updates a record atomically, unmarking any previous soft-delete,
-    /// and emits an `Upsert` change notification.
+    /// and emits an `Upsert` change notification if the record was inserted or updated.
+    ///
+    /// Stale updates (where `input.indexed_at < records.indexed_at`) are discarded to prevent
+    /// out-of-order firehose event delivery from clobbering newer state.
     ///
     /// # Errors
     /// Returns [`SkybaseError::Storage`] or [`SkybaseError::Serialization`] on error.
@@ -252,16 +262,20 @@ impl RecordStore {
         let indexed_at_i64 = i64::try_from(input.indexed_at)
             .map_err(|e| SkybaseError::Index(format!("indexed_at out of i64 range: {e}")))?;
 
-        {
+        let rows_affected = {
             let conn = self.inner.conn.lock();
             let mut stmt = conn.prepare_cached(
                 "INSERT INTO records (uri, cid, did, collection, rkey, record_json, indexed_at, is_deleted)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)
                  ON CONFLICT(uri) DO UPDATE SET
                      cid = excluded.cid,
+                     did = excluded.did,
+                     collection = excluded.collection,
+                     rkey = excluded.rkey,
                      record_json = excluded.record_json,
                      indexed_at = excluded.indexed_at,
-                     is_deleted = 0;",
+                     is_deleted = 0
+                 WHERE excluded.indexed_at >= records.indexed_at;",
             )?;
 
             stmt.execute(rusqlite::params![
@@ -272,25 +286,29 @@ impl RecordStore {
                 input.rkey,
                 record_json_str,
                 indexed_at_i64,
-            ])?;
-        }
-
-        let row = RecordRow {
-            uri: input.uri.clone(),
-            cid: input.cid.clone(),
-            did: input.did.clone(),
-            collection: input.collection.clone(),
-            rkey: input.rkey.clone(),
-            record_json: input.record_json.clone(),
-            indexed_at: input.indexed_at,
-            is_deleted: false,
+            ])?
         };
-        self.inner.bus.publish_upsert(row);
+
+        if rows_affected > 0 {
+            let row = RecordRow {
+                uri: input.uri.clone(),
+                cid: input.cid.clone(),
+                did: input.did.clone(),
+                collection: input.collection.clone(),
+                rkey: input.rkey.clone(),
+                record_json: input.record_json.clone(),
+                indexed_at: input.indexed_at,
+                is_deleted: false,
+            };
+            self.inner.bus.publish_upsert(row);
+        }
 
         Ok(())
     }
 
     /// Upserts a slice of records atomically in a single SQLite transaction.
+    ///
+    /// Only records that successfully insert or advance state emit `Upsert` notifications.
     ///
     /// # Errors
     /// Returns [`SkybaseError::Storage`] or [`SkybaseError::Serialization`] on error.
@@ -311,9 +329,13 @@ impl RecordStore {
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)
                      ON CONFLICT(uri) DO UPDATE SET
                          cid = excluded.cid,
+                         did = excluded.did,
+                         collection = excluded.collection,
+                         rkey = excluded.rkey,
                          record_json = excluded.record_json,
                          indexed_at = excluded.indexed_at,
-                         is_deleted = 0;",
+                         is_deleted = 0
+                     WHERE excluded.indexed_at >= records.indexed_at;",
                 )?;
 
                 for input in records {
@@ -323,7 +345,7 @@ impl RecordStore {
                         SkybaseError::Index(format!("indexed_at out of i64 range: {e}"))
                     })?;
 
-                    stmt.execute(rusqlite::params![
+                    let rows_affected = stmt.execute(rusqlite::params![
                         input.uri,
                         input.cid,
                         input.did,
@@ -333,16 +355,18 @@ impl RecordStore {
                         indexed_at_i64,
                     ])?;
 
-                    rows_to_notify.push(RecordRow {
-                        uri: input.uri.clone(),
-                        cid: input.cid.clone(),
-                        did: input.did.clone(),
-                        collection: input.collection.clone(),
-                        rkey: input.rkey.clone(),
-                        record_json: input.record_json.clone(),
-                        indexed_at: input.indexed_at,
-                        is_deleted: false,
-                    });
+                    if rows_affected > 0 {
+                        rows_to_notify.push(RecordRow {
+                            uri: input.uri.clone(),
+                            cid: input.cid.clone(),
+                            did: input.did.clone(),
+                            collection: input.collection.clone(),
+                            rkey: input.rkey.clone(),
+                            record_json: input.record_json.clone(),
+                            indexed_at: input.indexed_at,
+                            is_deleted: false,
+                        });
+                    }
                 }
             }
 
@@ -356,11 +380,56 @@ impl RecordStore {
         Ok(())
     }
 
+    /// Soft-deletes multiple records atomically in a single SQLite transaction.
+    ///
+    /// Emits `Delete` notifications only for records that were actively transitioned to deleted.
+    ///
+    /// # Errors
+    /// Returns [`SkybaseError::Storage`] on database failure.
+    pub fn soft_delete_records_batch(&self, uris: &[String]) -> Result<()> {
+        if uris.is_empty() {
+            return Ok(());
+        }
+
+        let mut deleted_to_notify = Vec::new();
+
+        {
+            let mut conn = self.inner.conn.lock();
+            let tx = conn.transaction()?;
+
+            {
+                let mut stmt = tx.prepare_cached(
+                    "UPDATE records
+                     SET is_deleted = 1
+                     WHERE uri = ?1 AND is_deleted = 0
+                     RETURNING did, collection, rkey;",
+                )?;
+
+                for uri in uris {
+                    let mut rows = stmt.query(rusqlite::params![uri])?;
+                    if let Some(row) = rows.next()? {
+                        let did: String = row.get(0)?;
+                        let collection: String = row.get(1)?;
+                        let rkey: String = row.get(2)?;
+                        deleted_to_notify.push((uri.clone(), did, collection, rkey));
+                    }
+                }
+            }
+
+            tx.commit()?;
+        }
+
+        for (uri, did, collection, rkey) in deleted_to_notify {
+            self.inner.bus.publish_delete(uri, did, collection, rkey);
+        }
+
+        Ok(())
+    }
+
     /// Soft-deletes a record by setting `is_deleted = 1` and emits a `Delete` notification.
     ///
-    /// If the record was active in the database, it is marked as deleted. If the record does
-    /// not exist in the database, a `Delete` notification is still emitted based on parsing the
-    /// AT-URI.
+    /// Only emits a `Delete` notification if the record was active and transitioned to deleted.
+    /// Repeated calls for non-existent or already-deleted records are idempotent no-ops.
     ///
     /// # Errors
     /// Returns [`SkybaseError::Storage`] on database failure.
@@ -388,20 +457,6 @@ impl RecordStore {
 
         if let Some((did, collection, rkey)) = deleted_meta {
             self.inner.bus.publish_delete(uri, did, collection, rkey);
-        } else if let Some((did, collection, rkey)) = parse_at_uri(uri) {
-            let already_in_db = {
-                let conn = self.inner.conn.lock();
-                conn.query_row(
-                    "SELECT 1 FROM records WHERE uri = ?1",
-                    rusqlite::params![uri],
-                    |_| Ok(()),
-                )
-                .optional()?
-                .is_some()
-            };
-            if !already_in_db {
-                self.inner.bus.publish_delete(uri, did, collection, rkey);
-            }
         }
 
         Ok(())
@@ -452,16 +507,33 @@ impl RecordStore {
     /// Physically deletes a record from the database (hard delete).
     ///
     /// Returns `true` if a record was removed, or `false` if it did not exist.
+    /// Emits a `Delete` notification if a record was removed.
     ///
     /// # Errors
     /// Returns [`SkybaseError::Storage`] on database failure.
     pub fn hard_delete_record(&self, uri: &str) -> Result<bool> {
-        let conn = self.inner.conn.lock();
-        let rows_affected = conn.execute(
-            "DELETE FROM records WHERE uri = ?1;",
-            rusqlite::params![uri],
-        )?;
-        Ok(rows_affected > 0)
+        let deleted_meta: Option<(String, String, String)> = {
+            let conn = self.inner.conn.lock();
+            let mut stmt = conn.prepare_cached(
+                "DELETE FROM records WHERE uri = ?1 RETURNING did, collection, rkey;",
+            )?;
+            let mut rows = stmt.query(rusqlite::params![uri])?;
+            if let Some(row) = rows.next()? {
+                let did: String = row.get(0)?;
+                let collection: String = row.get(1)?;
+                let rkey: String = row.get(2)?;
+                Some((did, collection, rkey))
+            } else {
+                None
+            }
+        };
+
+        if let Some((did, collection, rkey)) = deleted_meta {
+            self.inner.bus.publish_delete(uri, did, collection, rkey);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     /// Subscribes to the live change notification broadcast bus.

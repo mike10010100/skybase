@@ -200,7 +200,7 @@ impl<'a> QueryBuilder<'a> {
                     params.push(json_to_sqlite_value(&clause.value));
                 }
                 QueryOp::Ne => {
-                    sql.push_str(" AND json_extract(record_json, ?) != ?");
+                    sql.push_str(" AND json_extract(record_json, ?) IS NOT ?");
                     params.push(json_to_sqlite_value(&clause.value));
                 }
                 QueryOp::Gt => {

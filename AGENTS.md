@@ -61,7 +61,7 @@ Every crate root enforces the strict compiler lint safety guard:
 - **Clock-Warp Safety**: Always compute elapsed time using `now.saturating_duration_since(earlier)` or `.map_or(0, ...)`. Never use raw `.duration_since()` as monotonic clocks can jump backwards under VM migrations or NTP syncs.
 - **Drift-Free Scheduling**: Recurring tasks (e.g. Jetstream cursor commits, cache evictions, token renewals) must calculate next runs relative to the previous anchor timestamp or use `tokio::time::interval`, not relative `Instant::now() + delay`.
 - **Never Hold Locks Across `.await` Points**: Synchronous mutex or `RwLock` guards must always be dropped before executing any `.await`, `sleep()`, or network I/O to prevent cooperative task starvation.
-- **Sharded State Partitioning**: High-concurrency structures (session stores, in-memory caches, subscription routing tables) use **64 independent `RwLock` shards** to eliminate lock contention under multi-threaded load.
+- **SQLite WAL & Non-Blocking Partitioning**: Embedded SQLite storage operates in Write-Ahead Logging (WAL) mode with busy timeout handling, supporting concurrent read queries alongside atomic writes. High-concurrency live query fanout uses bounded, non-blocking broadcast channels (`tokio::sync::broadcast`).
 - **Task Leak Prevention & Cancellation**: All background tasks (firehose ingestion, event dispatching, health checkers) must be tracked in a managed `tokio::task::JoinSet` tied to a `tokio_util::sync::CancellationToken`. On shutdown or timeout, tasks must be cleanly aborted and joined.
 - **Panic Boundaries**: Worker tasks executing foreign or user-supplied event closures must wrap execution in `std::panic::AssertUnwindSafe(...).catch_unwind()`.
 
@@ -90,17 +90,19 @@ Every crate root enforces the strict compiler lint safety guard:
 
 ## 🏗️ Architecture Quick Reference
 
-| Component / Module | File / Directory | Responsibility |
-| :--- | :--- | :--- |
-| **`Skybase`** | [`src/lib.rs`](src/lib.rs) | Unified engine facade and client entry point. |
-| **`SkybaseConfig`** | [`src/lib.rs`](src/lib.rs) | Builder and configuration parameters (OAuth endpoints, Jetstream URL). |
-| **`SkybaseError`** | [`src/error.rs`](src/error.rs) | Root strongly-typed error enum powered by `thiserror`. |
-| **`skybase-auth`** | `src/auth/` | Session coordinator, auto-refresh workers, and Axum/Tower guards (wrapping `skyauth`). |
-| **`skybase-repo`** | `src/repo/` | Sovereign PDS repository client, MST record mutations, and Lexicon schema validation. |
-| **`skybase-index`** | `src/index/` | Embedded Micro-AppView engine: Jetstream subscriber, SQLite WAL store, FTS5 full-text queries. |
-| **`skybase-events`** | `src/events/` | Reactive event triggers (`on_create`, `on_delete`) with durable monotonic cursor persistence. |
-| **`skybase-storage`** | `src/storage/` | Sovereign PDS blob upload with SHA-256 CID verification, magic byte checks, and edge CDN proxying. |
-| **`skybase-server`** | `src/server/` | Standalone PocketBase-style daemon with REST/WS gateway and embedded Web Admin dashboard. |
+| Component / Module | File / Directory | Responsibility | Status |
+| :--- | :--- | :--- | :--- |
+| **`Skybase`** | [`src/lib.rs`](src/lib.rs) | Unified engine facade and client entry point. | **Active (Phase 1.5)** |
+| **`SkybaseConfig`** | [`src/lib.rs`](src/lib.rs) | Builder and configuration parameters (OAuth endpoints, Jetstream URL). | **Active (Phase 1.5)** |
+| **`SkybaseError`** | [`src/error.rs`](src/error.rs) | Root strongly-typed error enum powered by `thiserror`. | **Active (Phase 1.5)** |
+| **`skybase::index`** | [`src/index/`](src/index/) | Embedded SQLite WAL store, JSON1 query engine, and live query broadcast bus. | **Active (Phase 1.5)** |
+| **`skybase::ingest`** | [`src/ingest/`](src/ingest/) | Resilient WebSocket Jetstream consumer, monotonic cursor tracker, exponential backoff, mock server. | **Active (Phase 1.5)** |
+| **`skybase::repo`** | [`src/repo/`](src/repo/) | Sovereign PDS client, DPoP signing, nonce retry challenge recovery, TID generator. | **Active (Phase 1.5)** |
+| **`skybase-auth`** | `src/auth/` | Session coordinator, auto-refresh workers, and Axum/Tower guards (wrapping `skyauth`). | Planned (Phase 2) |
+| **`skybase-events`** | `src/events/` | Reactive event triggers (`on_create`, `on_delete`) with durable monotonic cursor persistence. | Planned (Phase 3) |
+| **`skybase-storage`** | `src/storage/` | Sovereign PDS blob upload with SHA-256 CID verification, magic byte checks, and edge CDN proxying. | Planned (Phase 2) |
+| **`skybase-server`** | `src/server/` | Standalone PocketBase-style daemon with REST/WS gateway and embedded Web Admin dashboard. | Planned (Phase 3) |
+| **`skybase-rules`** | `src/rules/` | Declarative access control rules and schema policy guards. | Planned (Phase 3) |
 
 ---
 

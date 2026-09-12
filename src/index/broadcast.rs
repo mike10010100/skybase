@@ -114,16 +114,19 @@ impl Default for BroadcastBus {
     }
 }
 
+/// Maximum allowed capacity for the in-memory broadcast ring buffer (1,000,000 events).
+pub const MAX_BROADCAST_CAPACITY: usize = 1_000_000;
+
 impl BroadcastBus {
-    /// Creates a new [`BroadcastBus`] with the specified buffer capacity.
+    /// Creates a new broadcast bus with the given channel ring buffer capacity.
     ///
     /// # Errors
-    /// Returns [`SkybaseError::Config`] if `capacity` is 0.
+    /// Returns [`SkybaseError::Config`] if `capacity` is 0 or exceeds [`MAX_BROADCAST_CAPACITY`].
     pub fn new(capacity: usize) -> Result<Self> {
-        if capacity == 0 {
-            return Err(SkybaseError::Config(
-                "Broadcast bus capacity must be greater than 0".to_string(),
-            ));
+        if capacity == 0 || capacity > MAX_BROADCAST_CAPACITY {
+            return Err(SkybaseError::Config(format!(
+                "Broadcast bus capacity must be between 1 and {MAX_BROADCAST_CAPACITY}, got {capacity}"
+            )));
         }
         let (sender, _rx) = broadcast::channel(capacity);
         Ok(Self { sender })

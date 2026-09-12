@@ -34,53 +34,79 @@ pub struct PdsRepoClient {
 }
 
 impl PdsRepoClient {
-    /// Creates a new `PdsRepoClient` wrapping an authenticated [`OAuthSession`] and [`AtprotoOAuthClient`].
+    /// Fallible constructor creating a `PdsRepoClient` with strict redirect policies.
     ///
-    /// Borrows and shares the [`DPoPNonceCache`] from the OAuth client.
-    #[must_use]
-    pub fn new(session: Arc<OAuthSession>, client: Arc<AtprotoOAuthClient>) -> Self {
+    /// # Errors
+    /// Returns [`SkybaseError::Network`] if the underlying HTTP client cannot be built.
+    pub fn try_new(session: Arc<OAuthSession>, client: Arc<AtprotoOAuthClient>) -> Result<Self> {
         let nonce_cache = client.nonce_cache().clone();
-        let http_client = match Client::builder()
+        let http_client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
-        {
-            Ok(c) => c,
-            Err(_) => Client::new(),
-        };
+            .map_err(SkybaseError::Network)?;
 
-        Self {
+        Ok(Self {
             session,
             oauth_client: Some(client),
             http_client,
             nonce_cache,
             endpoint_override: None,
-        }
+        })
     }
 
-    /// Creates a `PdsRepoClient` directly from an [`OAuthSession`] with a fresh [`DPoPNonceCache`].
-    #[must_use]
-    pub fn from_session(session: Arc<OAuthSession>) -> Self {
-        let http_client = match Client::builder()
+    /// Fallible constructor directly from an [`OAuthSession`] with a fresh [`DPoPNonceCache`].
+    ///
+    /// # Errors
+    /// Returns [`SkybaseError::Network`] if the underlying HTTP client cannot be built.
+    pub fn try_from_session(session: Arc<OAuthSession>) -> Result<Self> {
+        let http_client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
-        {
-            Ok(c) => c,
-            Err(_) => Client::new(),
-        };
+            .map_err(SkybaseError::Network)?;
 
-        Self {
+        Ok(Self {
             session,
             oauth_client: None,
             http_client,
             nonce_cache: DPoPNonceCache::new(),
             endpoint_override: None,
-        }
+        })
+    }
+
+    /// Creates a new `PdsRepoClient` wrapping an authenticated [`OAuthSession`] and [`AtprotoOAuthClient`].
+    ///
+    /// Borrows and shares the [`DPoPNonceCache`] from the OAuth client.
+    #[must_use]
+    pub fn new(session: Arc<OAuthSession>, client: Arc<AtprotoOAuthClient>) -> Self {
+        Self::try_new(session.clone(), client.clone()).unwrap_or_else(|_| {
+            let nonce_cache = client.nonce_cache().clone();
+            Self {
+                session,
+                oauth_client: Some(client),
+                http_client: Client::new(),
+                nonce_cache,
+                endpoint_override: None,
+            }
+        })
+    }
+
+    /// Creates a `PdsRepoClient` directly from an [`OAuthSession`] with a fresh [`DPoPNonceCache`].
+    #[must_use]
+    pub fn from_session(session: Arc<OAuthSession>) -> Self {
+        Self::try_from_session(session.clone()).unwrap_or_else(|_| Self {
+            session,
+            oauth_client: None,
+            http_client: Client::new(),
+            nonce_cache: DPoPNonceCache::new(),
+            endpoint_override: None,
+        })
     }
 
     /// Convenience constructor creating an internal [`OAuthSession`] for manual credentials or testing.
     ///
     /// # Errors
-    /// Returns [`SkybaseError::Auth`] if session initialization fails.
+    /// Returns [`SkybaseError::Auth`] if session initialization fails, or [`SkybaseError::Network`]
+    /// if HTTP client creation fails.
     pub fn from_credentials(
         pds_endpoint: impl Into<String>,
         repo_did: impl Into<String>,
@@ -104,7 +130,7 @@ impl PdsRepoClient {
         )
         .map_err(SkybaseError::Auth)?;
 
-        Ok(Self::from_session(Arc::new(session)))
+        Self::try_from_session(Arc::new(session))
     }
 
     /// Overrides the PDS endpoint destination URL.
@@ -221,13 +247,19 @@ impl PdsRepoClient {
         let uri = res_json
             .get("uri")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| SkybaseError::Repo("Missing 'uri' in createRecord response".into()))?
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| {
+                SkybaseError::Repo("Missing or empty 'uri' in createRecord response".into())
+            })?
             .to_string();
 
         let cid = res_json
             .get("cid")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| SkybaseError::Repo("Missing 'cid' in createRecord response".into()))?
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| {
+                SkybaseError::Repo("Missing or empty 'cid' in createRecord response".into())
+            })?
             .to_string();
 
         Ok(CreateRecordResult { uri, cid })
@@ -379,7 +411,7 @@ impl PdsRepoClient {
                 let (is_challenge, err_bytes) = if is_challenge_header {
                     (true, Vec::new())
                 } else {
-                    let err_bytes = read_bounded_bytes(resp, MAX_ERROR_BODY_BYTES).await?;
+                    let err_bytes = read_error_bytes_bounded(resp, MAX_ERROR_BODY_BYTES).await;
                     let json_val: Option<serde_json::Value> =
                         serde_json::from_slice(&err_bytes).ok();
                     let is_error_field = is_use_dpop_nonce_error(json_val.as_ref());
@@ -416,7 +448,7 @@ impl PdsRepoClient {
             }
 
             // 8. Other HTTP failure statuses (403, 404, 500, 502, etc.)
-            let err_bytes = read_bounded_bytes(resp, MAX_ERROR_BODY_BYTES).await?;
+            let err_bytes = read_error_bytes_bounded(resp, MAX_ERROR_BODY_BYTES).await;
             let err_msg = format_xrpc_error(status, &err_bytes);
             return Err(SkybaseError::Repo(err_msg));
         }
@@ -462,9 +494,27 @@ fn is_use_dpop_nonce_error(json: Option<&serde_json::Value>) -> bool {
 }
 
 /// Reads an HTTP response body incrementally chunk-by-chunk up to `max_bytes`.
+///
+/// # Errors
+/// Returns [`SkybaseError::Repo`] if the payload exceeds `max_bytes`, or
+/// [`SkybaseError::Network`] on transport failure.
 async fn read_bounded_bytes(mut resp: reqwest::Response, max_bytes: usize) -> Result<Vec<u8>> {
     let mut buffer = Vec::new();
     while let Some(chunk) = resp.chunk().await.map_err(SkybaseError::Network)? {
+        if buffer.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(SkybaseError::Repo(format!(
+                "HTTP response body exceeded maximum limit of {max_bytes} bytes"
+            )));
+        }
+        buffer.extend_from_slice(&chunk);
+    }
+    Ok(buffer)
+}
+
+/// Reads an HTTP error response body incrementally chunk-by-chunk up to `max_bytes` without failing on truncation.
+async fn read_error_bytes_bounded(mut resp: reqwest::Response, max_bytes: usize) -> Vec<u8> {
+    let mut buffer = Vec::new();
+    while let Ok(Some(chunk)) = resp.chunk().await {
         if buffer.len().saturating_add(chunk.len()) > max_bytes {
             let remaining = max_bytes.saturating_sub(buffer.len());
             buffer.extend_from_slice(&chunk[..remaining]);
@@ -472,7 +522,7 @@ async fn read_bounded_bytes(mut resp: reqwest::Response, max_bytes: usize) -> Re
         }
         buffer.extend_from_slice(&chunk);
     }
-    Ok(buffer)
+    buffer
 }
 
 /// Formats an XRPC or HTTP error payload into a readable error message.
@@ -881,5 +931,89 @@ mod tests {
             .delete_record("app.bsky.feed.post", "invalid/slash")
             .await;
         assert!(delete_res.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_client_create_record_rejects_empty_uri_or_cid() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/xrpc/com.atproto.repo.createRecord"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "uri": "   ",
+                "cid": "bafyrei_valid_cid"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_xyz")
+            .expect("client creation failed");
+
+        let res = client
+            .create_record("app.bsky.feed.post", None, &json!({ "text": "hi" }), true)
+            .await;
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("Missing or empty 'uri'"));
+    }
+
+    #[tokio::test]
+    async fn test_client_create_record_rejects_oversized_response_body() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        // Construct a response body > 1MB (MAX_SUCCESS_BODY_BYTES)
+        let huge_text = "x".repeat(MAX_SUCCESS_BODY_BYTES + 1024);
+        let huge_body = format!(
+            r#"{{"uri":"at://did:plc:alice/app.bsky.feed.post/1","cid":"bafy","extra":"{huge_text}"}}"#
+        );
+
+        Mock::given(method("POST"))
+            .and(path("/xrpc/com.atproto.repo.createRecord"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(huge_body, "application/json"))
+            .mount(&server)
+            .await;
+
+        let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_xyz")
+            .expect("client creation failed");
+
+        let res = client
+            .create_record("app.bsky.feed.post", None, &json!({ "text": "hi" }), true)
+            .await;
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("exceeded maximum limit"));
+    }
+
+    #[test]
+    fn test_client_try_constructors() {
+        let session = Arc::new(
+            OAuthSession::new(
+                "did:plc:alice",
+                "token",
+                None,
+                "DPoP",
+                None,
+                Some(3600),
+                skyauth::dpop::DPoPKey::generate(),
+                Some("https://pds.example.com".into()),
+                None,
+                None,
+            )
+            .expect("session creation failed"),
+        );
+
+        let client = PdsRepoClient::try_from_session(session)
+            .expect("try_from_session should succeed with valid parameters");
+        assert_eq!(client.did(), "did:plc:alice");
     }
 }

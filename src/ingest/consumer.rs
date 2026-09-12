@@ -13,13 +13,14 @@ use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Message};
 use tokio_util::sync::CancellationToken;
+use url::form_urlencoded;
 
 use crate::error::{Result, SkybaseError};
-use crate::index::{RecordInput, RecordStore};
+use crate::index::RecordStore;
 use crate::ingest::backoff::BackoffManager;
 use crate::ingest::cursor::CursorTracker;
 use crate::ingest::events::{
-    normalize_indexed_at, parse_jetstream_frame, CommitOperation, JetstreamCommit, JetstreamEvent,
+    parse_jetstream_frame, CommitOperation, JetstreamCommit, JetstreamEvent,
 };
 
 /// Configuration options for the Jetstream firehose consumer.
@@ -259,8 +260,9 @@ pub fn build_subscription_url_full(
 ) -> String {
     let mut url = base_url.trim().to_string();
 
-    // Ensure valid scheme exists
-    if !url.starts_with("ws://") && !url.starts_with("wss://") {
+    // Ensure valid scheme exists (case-insensitive)
+    let lower = url.to_ascii_lowercase();
+    if !lower.starts_with("ws://") && !lower.starts_with("wss://") {
         url = format!("wss://{url}");
     }
 
@@ -280,8 +282,10 @@ pub fn build_subscription_url_full(
     // 1. Append wantedCollections if not already present in base URL
     if !url.contains("wantedCollections=") {
         for col in wanted_collections {
-            if !col.trim().is_empty() {
-                query_params.push(format!("wantedCollections={col}"));
+            let trimmed = col.trim();
+            if !trimmed.is_empty() {
+                let encoded: String = form_urlencoded::byte_serialize(trimmed.as_bytes()).collect();
+                query_params.push(format!("wantedCollections={encoded}"));
             }
         }
     }
@@ -289,8 +293,11 @@ pub fn build_subscription_url_full(
     // 2. Append wantedDids if not already present
     if !url.contains("wantedDids=") {
         for did in wanted_dids {
-            if !did.trim().is_empty() {
-                query_params.push(format!("wantedDids={did}"));
+            let trimmed = did.trim();
+            if !trimmed.is_empty() {
+                let encoded: String = form_urlencoded::byte_serialize(trimmed.as_bytes()).collect();
+                let safe_did = encoded.replace("%3A", ":");
+                query_params.push(format!("wantedDids={safe_did}"));
             }
         }
     }
@@ -375,7 +382,8 @@ impl JetstreamConsumer {
             return Ok(());
         }
 
-        let (tx, rx) = tokio::sync::mpsc::channel::<JetstreamCommit>(self.config.channel_capacity);
+        let capacity = self.config.channel_capacity.max(1);
+        let (tx, rx) = tokio::sync::mpsc::channel::<JetstreamCommit>(capacity);
         let mut join_set = tokio::task::JoinSet::new();
 
         // 1. Spawn Storage Sync Worker Task
@@ -420,10 +428,10 @@ impl JetstreamConsumer {
     /// Spawns the consumer as a managed background task tied to the cancellation token.
     pub fn start(&self, cancel: CancellationToken) -> JetstreamConsumerHandle {
         let this = self.clone();
-        let cancel_child = cancel.child_token();
-        let join_handle = tokio::spawn(async move { this.run(cancel_child).await });
+        let run_token = cancel.clone();
+        let join_handle = tokio::spawn(async move { this.run(run_token).await });
         JetstreamConsumerHandle {
-            join_handle,
+            join_handle: Some(join_handle),
             cancel,
         }
     }
@@ -431,8 +439,17 @@ impl JetstreamConsumer {
 
 /// A running background task handle for [`JetstreamConsumer`].
 pub struct JetstreamConsumerHandle {
-    join_handle: tokio::task::JoinHandle<Result<()>>,
+    join_handle: Option<tokio::task::JoinHandle<Result<()>>>,
     cancel: CancellationToken,
+}
+
+impl Drop for JetstreamConsumerHandle {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        if let Some(ref handle) = self.join_handle {
+            handle.abort();
+        }
+    }
 }
 
 impl JetstreamConsumerHandle {
@@ -445,18 +462,22 @@ impl JetstreamConsumerHandle {
     ///
     /// # Errors
     /// Returns [`SkybaseError::Event`] if the background task encountered a fatal error.
-    pub async fn join(self) -> Result<()> {
-        match self.join_handle.await {
-            Ok(res) => res,
-            Err(join_err) => {
-                if join_err.is_cancelled() {
-                    Ok(())
-                } else {
-                    Err(SkybaseError::Event(format!(
-                        "Consumer task join error: {join_err}"
-                    )))
+    pub async fn join(mut self) -> Result<()> {
+        if let Some(handle) = self.join_handle.take() {
+            match handle.await {
+                Ok(res) => res,
+                Err(join_err) => {
+                    if join_err.is_cancelled() {
+                        Ok(())
+                    } else {
+                        Err(SkybaseError::Event(format!(
+                            "Consumer task join error: {join_err}"
+                        )))
+                    }
                 }
             }
+        } else {
+            Ok(())
         }
     }
 }
@@ -506,11 +527,19 @@ async fn run_reader_reconnect_loop(
         tracing::info!(endpoint = %url, "Connected to Jetstream firehose");
 
         let mut last_activity = Instant::now();
-        let mut ping_interval = config.ping_interval.map(tokio::time::interval);
+        let mut ping_interval = config
+            .ping_interval
+            .filter(|d| *d > Duration::ZERO)
+            .map(tokio::time::interval);
 
         loop {
-            let timeout_duration = config.inactivity_timeout;
-            let sleep_watchdog = tokio::time::sleep_until(last_activity + timeout_duration);
+            let timeout_duration = config
+                .inactivity_timeout
+                .min(Duration::from_secs(86400 * 365));
+            let deadline = last_activity
+                .checked_add(timeout_duration)
+                .unwrap_or_else(|| last_activity + Duration::from_secs(86400 * 365));
+            let sleep_watchdog = tokio::time::sleep_until(deadline);
 
             tokio::select! {
                 () = cancel.cancelled() => {
@@ -676,17 +705,10 @@ fn apply_single_commit(commit: &JetstreamCommit, store: &RecordStore, stats: &Co
     let uri = commit.uri();
     match commit.operation {
         CommitOperation::Create | CommitOperation::Update => {
-            let input = RecordInput {
-                uri: uri.clone(),
-                cid: commit.cid.clone().unwrap_or_default(),
-                did: commit.did.clone(),
-                collection: commit.collection.clone(),
-                rkey: commit.rkey.clone(),
-                record_json: commit
-                    .record
-                    .clone()
-                    .unwrap_or_else(|| serde_json::Value::Object(Default::default())),
-                indexed_at: normalize_indexed_at(commit.time_us),
+            let Some(input) = commit.to_record_input(None) else {
+                stats.sync_errors.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(uri = %uri, "Ignoring commit with missing record payload");
+                return;
             };
             match store.upsert_record(&input) {
                 Ok(()) => {
@@ -715,8 +737,49 @@ fn flush_commit_batch(
     store: &RecordStore,
     stats: &ConsumerStats,
 ) {
+    let mut upserts = Vec::new();
+    let mut deletes = Vec::new();
+
     for commit in buffer.drain(..) {
-        apply_single_commit(&commit, store, stats);
+        match commit.operation {
+            CommitOperation::Create | CommitOperation::Update => {
+                if let Some(input) = commit.to_record_input(None) {
+                    upserts.push(input);
+                } else {
+                    stats.sync_errors.fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(uri = %commit.uri(), "Ignoring commit with missing record payload");
+                }
+            }
+            CommitOperation::Delete => {
+                deletes.push(commit.uri());
+            }
+        }
+    }
+
+    if !upserts.is_empty() {
+        let count = upserts.len() as u64;
+        match store.upsert_records_batch(&upserts) {
+            Ok(()) => {
+                stats.records_upserted.fetch_add(count, Ordering::Relaxed);
+            }
+            Err(err) => {
+                stats.sync_errors.fetch_add(count, Ordering::Relaxed);
+                tracing::error!("Failed to batch upsert records: {err}");
+            }
+        }
+    }
+
+    if !deletes.is_empty() {
+        let count = deletes.len() as u64;
+        match store.soft_delete_records_batch(&deletes) {
+            Ok(()) => {
+                stats.records_deleted.fetch_add(count, Ordering::Relaxed);
+            }
+            Err(err) => {
+                stats.sync_errors.fetch_add(count, Ordering::Relaxed);
+                tracing::error!("Failed to batch soft-delete records: {err}");
+            }
+        }
     }
 }
 
