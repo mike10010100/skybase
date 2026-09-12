@@ -34,8 +34,9 @@ pub mod repo;
 
 pub use error::{Result, SkybaseError};
 pub use index::{
-    parse_at_uri, BroadcastBus, ChangeNotification, QueryBuilder, QueryOp, RecordInput, RecordRow,
-    RecordStore, RecordStoreConfig, SortDirection, DEFAULT_BROADCAST_CAPACITY,
+    parse_at_uri, BatchStats, BroadcastBus, ChangeNotification, QueryBuilder, QueryOp, RecordInput,
+    RecordRow, RecordStore, RecordStoreConfig, SortDirection, StoreOperation,
+    DEFAULT_BROADCAST_CAPACITY,
 };
 pub use ingest::{
     build_subscription_url, build_subscription_url_full, normalize_indexed_at,
@@ -277,7 +278,7 @@ impl Skybase {
         Ok(self.require_store()?.query(collection))
     }
 
-    /// Initiates a structured [`QueryBuilder`] scoped to the given collection NSID (alias for [`query`]).
+    /// Initiates a structured [`QueryBuilder`] scoped to the given collection NSID (alias for [`query`](Self::query)).
     ///
     /// # Errors
     /// Returns [`SkybaseError::Config`] if no record store is attached.
@@ -350,8 +351,13 @@ impl Skybase {
     }
 
     /// Creates a sovereign PDS repository client bound to the provided OAuth session.
-    #[must_use]
-    pub fn repo_client(&self, session: Arc<skyauth::session::OAuthSession>) -> PdsRepoClient {
+    ///
+    /// # Errors
+    /// Returns [`SkybaseError::Network`] if HTTP client initialization fails.
+    pub fn repo_client(
+        &self,
+        session: Arc<skyauth::session::OAuthSession>,
+    ) -> Result<PdsRepoClient> {
         PdsRepoClient::new(session, Arc::clone(&self.auth_client))
     }
 
@@ -360,7 +366,8 @@ impl Skybase {
     /// Leverages the facade's internal OAuth client for DPoP proof generation and nonce caching.
     ///
     /// # Errors
-    /// Returns [`SkybaseError::Auth`] if session creation fails.
+    /// Returns [`SkybaseError::Auth`] if session creation fails, or [`SkybaseError::Network`]
+    /// if HTTP client creation fails.
     pub fn repo_client_from_credentials(
         &self,
         pds_endpoint: impl Into<String>,
@@ -377,7 +384,7 @@ impl Skybase {
             None,
             "DPoP",
             None,
-            Some(3600),
+            None,
             skyauth::dpop::DPoPKey::generate(),
             Some(endpoint),
             None,
@@ -385,10 +392,7 @@ impl Skybase {
         )
         .map_err(SkybaseError::Auth)?;
 
-        Ok(PdsRepoClient::new(
-            Arc::new(session),
-            Arc::clone(&self.auth_client),
-        ))
+        PdsRepoClient::new(Arc::new(session), Arc::clone(&self.auth_client))
     }
 }
 
@@ -431,7 +435,7 @@ mod tests {
             None,
             "DPoP",
             None,
-            Some(3600),
+            None,
             skyauth::dpop::DPoPKey::generate(),
             Some("https://pds.example.com".into()),
             None,
@@ -439,7 +443,7 @@ mod tests {
         )
         .expect("session creation failed");
 
-        let client = skybase.repo_client(Arc::new(session));
+        let client = skybase.repo_client(Arc::new(session)).expect("repo_client");
         assert_eq!(client.did(), "did:plc:alice");
         assert_eq!(
             client.pds_endpoint().expect("endpoint"),

@@ -105,6 +105,31 @@ pub struct RecordRow {
     pub is_deleted: bool,
 }
 
+/// An operation to execute within an atomic batch on [`RecordStore`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum StoreOperation {
+    /// Upsert a record.
+    Upsert(RecordInput),
+    /// Soft delete a record at the specified monotonic timestamp.
+    Delete {
+        /// Canonical AT-URI.
+        uri: String,
+        /// Monotonic timestamp in microseconds.
+        indexed_at: u64,
+    },
+}
+
+/// Statistics for operations applied in an atomic batch.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct BatchStats {
+    /// Number of records inserted or updated.
+    pub upserted: usize,
+    /// Number of records transitioned to deleted.
+    pub deleted: usize,
+    /// Number of invalid records skipped.
+    pub skipped: usize,
+}
+
 /// Configuration options for initializing a [`RecordStore`].
 #[derive(Debug, Clone)]
 pub struct RecordStoreConfig {
@@ -239,6 +264,10 @@ impl RecordStore {
                  indexed_at INTEGER NOT NULL,
                  is_deleted INTEGER NOT NULL DEFAULT 0
              );
+             CREATE TABLE IF NOT EXISTS _skybase_meta (
+                 key TEXT PRIMARY KEY,
+                 value TEXT NOT NULL
+             );
              CREATE INDEX IF NOT EXISTS idx_records_collection ON records(collection);
              CREATE INDEX IF NOT EXISTS idx_records_did ON records(did);
              CREATE INDEX IF NOT EXISTS idx_records_indexed_at ON records(indexed_at);
@@ -306,25 +335,34 @@ impl RecordStore {
         Ok(())
     }
 
-    /// Upserts a slice of records atomically in a single SQLite transaction.
+    /// Applies a batch of [`StoreOperation`] mutations atomically in exact arrival order.
     ///
-    /// Only records that successfully insert or advance state emit `Upsert` notifications.
+    /// Stale creates and stale deletes are dropped via monotonic `indexed_at` LWW barriers.
+    /// If `cursor` is provided, it is persisted to `_skybase_meta` within the same transaction.
+    ///
+    /// Invalid timestamps or JSON payloads are quarantined/skipped without aborting the batch.
     ///
     /// # Errors
-    /// Returns [`SkybaseError::Storage`] or [`SkybaseError::Serialization`] on error.
-    pub fn upsert_records_batch(&self, records: &[RecordInput]) -> Result<()> {
-        if records.is_empty() {
-            return Ok(());
+    /// Returns [`SkybaseError::Storage`] on database transaction failure.
+    pub fn apply_operations_batch(
+        &self,
+        operations: &[StoreOperation],
+        cursor: Option<u64>,
+    ) -> Result<BatchStats> {
+        if operations.is_empty() && cursor.is_none() {
+            return Ok(BatchStats::default());
         }
 
-        let mut rows_to_notify = Vec::with_capacity(records.len());
+        let mut stats = BatchStats::default();
+        let mut upserts_to_notify = Vec::new();
+        let mut deletes_to_notify = Vec::new();
 
         {
             let mut conn = self.inner.conn.lock();
             let tx = conn.transaction()?;
 
             {
-                let mut stmt = tx.prepare_cached(
+                let mut upsert_stmt = tx.prepare_cached(
                     "INSERT INTO records (uri, cid, did, collection, rkey, record_json, indexed_at, is_deleted)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)
                      ON CONFLICT(uri) DO UPDATE SET
@@ -338,102 +376,197 @@ impl RecordStore {
                      WHERE excluded.indexed_at >= records.indexed_at;",
                 )?;
 
-                for input in records {
-                    let record_json_str = serde_json::to_string(&input.record_json)
-                        .map_err(SkybaseError::Serialization)?;
-                    let indexed_at_i64 = i64::try_from(input.indexed_at).map_err(|e| {
-                        SkybaseError::Index(format!("indexed_at out of i64 range: {e}"))
-                    })?;
+                let mut delete_stmt = tx.prepare_cached(
+                    "UPDATE records
+                     SET is_deleted = 1,
+                         indexed_at = ?2
+                     WHERE uri = ?1 AND ?2 >= indexed_at AND is_deleted = 0
+                     RETURNING did, collection, rkey;",
+                )?;
 
-                    let rows_affected = stmt.execute(rusqlite::params![
-                        input.uri,
-                        input.cid,
-                        input.did,
-                        input.collection,
-                        input.rkey,
-                        record_json_str,
-                        indexed_at_i64,
-                    ])?;
+                for op in operations {
+                    match op {
+                        StoreOperation::Upsert(input) => {
+                            let record_json_str = match serde_json::to_string(&input.record_json) {
+                                Ok(s) => s,
+                                Err(err) => {
+                                    stats.skipped += 1;
+                                    tracing::warn!(uri = %input.uri, "Skipping upsert with invalid JSON in batch: {err}");
+                                    continue;
+                                }
+                            };
+                            let indexed_at_i64 = match i64::try_from(input.indexed_at) {
+                                Ok(t) => t,
+                                Err(err) => {
+                                    stats.skipped += 1;
+                                    tracing::warn!(uri = %input.uri, "Skipping upsert with out-of-range timestamp in batch: {err}");
+                                    continue;
+                                }
+                            };
 
-                    if rows_affected > 0 {
-                        rows_to_notify.push(RecordRow {
-                            uri: input.uri.clone(),
-                            cid: input.cid.clone(),
-                            did: input.did.clone(),
-                            collection: input.collection.clone(),
-                            rkey: input.rkey.clone(),
-                            record_json: input.record_json.clone(),
-                            indexed_at: input.indexed_at,
-                            is_deleted: false,
-                        });
+                            let rows_affected = upsert_stmt.execute(rusqlite::params![
+                                input.uri,
+                                input.cid,
+                                input.did,
+                                input.collection,
+                                input.rkey,
+                                record_json_str,
+                                indexed_at_i64,
+                            ])?;
+
+                            if rows_affected > 0 {
+                                stats.upserted += 1;
+                                upserts_to_notify.push(RecordRow {
+                                    uri: input.uri.clone(),
+                                    cid: input.cid.clone(),
+                                    did: input.did.clone(),
+                                    collection: input.collection.clone(),
+                                    rkey: input.rkey.clone(),
+                                    record_json: input.record_json.clone(),
+                                    indexed_at: input.indexed_at,
+                                    is_deleted: false,
+                                });
+                            }
+                        }
+                        StoreOperation::Delete { uri, indexed_at } => {
+                            let indexed_at_i64 = match i64::try_from(*indexed_at) {
+                                Ok(t) => t,
+                                Err(err) => {
+                                    stats.skipped += 1;
+                                    tracing::warn!(uri = %uri, "Skipping delete with out-of-range timestamp in batch: {err}");
+                                    continue;
+                                }
+                            };
+
+                            let mut rows =
+                                delete_stmt.query(rusqlite::params![uri, indexed_at_i64])?;
+                            if let Some(row) = rows.next()? {
+                                stats.deleted += 1;
+                                let did: String = row.get(0)?;
+                                let collection: String = row.get(1)?;
+                                let rkey: String = row.get(2)?;
+                                deletes_to_notify.push((uri.clone(), did, collection, rkey));
+                            }
+                        }
                     }
+                }
+
+                if let Some(cur) = cursor {
+                    let mut meta_stmt = tx.prepare_cached(
+                        "INSERT INTO _skybase_meta (key, value) VALUES ('cursor', ?1)
+                         ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
+                    )?;
+                    meta_stmt.execute(rusqlite::params![cur.to_string()])?;
                 }
             }
 
             tx.commit()?;
         }
 
-        for row in rows_to_notify {
+        for row in upserts_to_notify {
             self.inner.bus.publish_upsert(row);
         }
+        for (uri, did, collection, rkey) in deletes_to_notify {
+            self.inner.bus.publish_delete(uri, did, collection, rkey);
+        }
 
+        Ok(stats)
+    }
+
+    /// Upserts a slice of records atomically in a single SQLite transaction.
+    ///
+    /// Records with invalid timestamps or JSON are skipped without aborting the transaction.
+    /// Only records that successfully insert or advance state emit `Upsert` notifications.
+    ///
+    /// # Errors
+    /// Returns [`SkybaseError::Storage`] on database transaction failure.
+    pub fn upsert_records_batch(&self, records: &[RecordInput]) -> Result<()> {
+        for record in records {
+            i64::try_from(record.indexed_at)
+                .map_err(|e| SkybaseError::Index(format!("indexed_at out of i64 range: {e}")))?;
+            serde_json::to_string(&record.record_json)?;
+        }
+        let ops: Vec<StoreOperation> = records
+            .iter()
+            .cloned()
+            .map(StoreOperation::Upsert)
+            .collect();
+        self.apply_operations_batch(&ops, None)?;
         Ok(())
     }
 
-    /// Soft-deletes multiple records atomically in a single SQLite transaction.
+    /// Soft-deletes multiple records atomically with monotonic LWW timestamps.
     ///
+    /// Each item is a tuple of `(uri, indexed_at)`.
     /// Emits `Delete` notifications only for records that were actively transitioned to deleted.
     ///
     /// # Errors
     /// Returns [`SkybaseError::Storage`] on database failure.
-    pub fn soft_delete_records_batch(&self, uris: &[String]) -> Result<()> {
-        if uris.is_empty() {
-            return Ok(());
-        }
-
-        let mut deleted_to_notify = Vec::new();
-
-        {
-            let mut conn = self.inner.conn.lock();
-            let tx = conn.transaction()?;
-
-            {
-                let mut stmt = tx.prepare_cached(
-                    "UPDATE records
-                     SET is_deleted = 1
-                     WHERE uri = ?1 AND is_deleted = 0
-                     RETURNING did, collection, rkey;",
-                )?;
-
-                for uri in uris {
-                    let mut rows = stmt.query(rusqlite::params![uri])?;
-                    if let Some(row) = rows.next()? {
-                        let did: String = row.get(0)?;
-                        let collection: String = row.get(1)?;
-                        let rkey: String = row.get(2)?;
-                        deleted_to_notify.push((uri.clone(), did, collection, rkey));
-                    }
-                }
-            }
-
-            tx.commit()?;
-        }
-
-        for (uri, did, collection, rkey) in deleted_to_notify {
-            self.inner.bus.publish_delete(uri, did, collection, rkey);
-        }
-
-        Ok(())
+    pub fn soft_delete_records_batch(&self, items: &[(&str, u64)]) -> Result<usize> {
+        let ops: Vec<StoreOperation> = items
+            .iter()
+            .map(|&(uri, indexed_at)| StoreOperation::Delete {
+                uri: uri.to_string(),
+                indexed_at,
+            })
+            .collect();
+        let stats = self.apply_operations_batch(&ops, None)?;
+        Ok(stats.deleted)
     }
 
-    /// Soft-deletes a record by setting `is_deleted = 1` and emits a `Delete` notification.
+    /// Soft-deletes a record by setting `is_deleted = 1` and updating `indexed_at`
+    /// if `indexed_at >= records.indexed_at`.
     ///
-    /// Only emits a `Delete` notification if the record was active and transitioned to deleted.
-    /// Repeated calls for non-existent or already-deleted records are idempotent no-ops.
+    /// Emits a `Delete` notification if the record was active and transitioned to deleted.
+    /// Stale delete calls (`indexed_at < records.indexed_at`) or repeated calls for already-deleted
+    /// records are idempotent no-ops that return `Ok(false)`.
+    ///
+    /// Returns `true` if the record transitioned from active to deleted, `false` otherwise.
+    ///
+    /// # Errors
+    /// Returns [`SkybaseError::Storage`] or [`SkybaseError::Index`] on database failure.
+    pub fn soft_delete_record(&self, uri: &str, indexed_at: u64) -> Result<bool> {
+        let indexed_at_i64 = i64::try_from(indexed_at)
+            .map_err(|e| SkybaseError::Index(format!("indexed_at out of i64 range: {e}")))?;
+
+        let deleted_meta: Option<(String, String, String)> = {
+            let conn = self.inner.conn.lock();
+            let mut stmt = conn.prepare_cached(
+                "UPDATE records
+                 SET is_deleted = 1,
+                     indexed_at = ?2
+                 WHERE uri = ?1 AND ?2 >= indexed_at AND is_deleted = 0
+                 RETURNING did, collection, rkey;",
+            )?;
+
+            let mut rows = stmt.query(rusqlite::params![uri, indexed_at_i64])?;
+
+            if let Some(row) = rows.next()? {
+                let did: String = row.get(0)?;
+                let collection: String = row.get(1)?;
+                let rkey: String = row.get(2)?;
+                Some((did, collection, rkey))
+            } else {
+                None
+            }
+        };
+
+        if let Some((did, collection, rkey)) = deleted_meta {
+            self.inner.bus.publish_delete(uri, did, collection, rkey);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Convenience soft-delete without explicit timestamp, setting `is_deleted = 1`
+    /// without modifying `indexed_at`.
+    ///
+    /// Primarily intended for manual testing or administrative deletions.
     ///
     /// # Errors
     /// Returns [`SkybaseError::Storage`] on database failure.
-    pub fn soft_delete_record(&self, uri: &str) -> Result<()> {
+    pub fn soft_delete_record_unversioned(&self, uri: &str) -> Result<bool> {
         let deleted_meta: Option<(String, String, String)> = {
             let conn = self.inner.conn.lock();
             let mut stmt = conn.prepare_cached(
@@ -457,9 +590,66 @@ impl RecordStore {
 
         if let Some((did, collection, rkey)) = deleted_meta {
             self.inner.bus.publish_delete(uri, did, collection, rkey);
+            Ok(true)
+        } else {
+            Ok(false)
         }
+    }
 
+    /// Retrieves a metadata string value by key from `_skybase_meta`.
+    ///
+    /// # Errors
+    /// Returns [`SkybaseError::Storage`] on database error.
+    pub fn get_meta(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.inner.conn.lock();
+        let mut stmt = conn.prepare_cached("SELECT value FROM _skybase_meta WHERE key = ?1;")?;
+        let mut rows = stmt.query(rusqlite::params![key])?;
+        if let Some(row) = rows.next()? {
+            let val: String = row.get(0)?;
+            Ok(Some(val))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Sets a metadata string value by key in `_skybase_meta`.
+    ///
+    /// # Errors
+    /// Returns [`SkybaseError::Storage`] on database error.
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        let conn = self.inner.conn.lock();
+        let mut stmt = conn.prepare_cached(
+            "INSERT INTO _skybase_meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
+        )?;
+        stmt.execute(rusqlite::params![key, value])?;
         Ok(())
+    }
+
+    /// Retrieves the persisted Jetstream sequence cursor from SQLite.
+    ///
+    /// Returns `None` if no cursor has been recorded yet.
+    ///
+    /// # Errors
+    /// Returns [`SkybaseError::Storage`] on database or parsing error.
+    pub fn get_cursor(&self) -> Result<Option<u64>> {
+        match self.get_meta("cursor")? {
+            Some(s) => {
+                let cursor = s.parse::<u64>().map_err(|e| {
+                    SkybaseError::Storage(format!("Corrupted cursor value in _skybase_meta: {e}"))
+                })?;
+                Ok(Some(cursor))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Persists the Jetstream sequence cursor to SQLite.
+    ///
+    /// # Errors
+    /// Returns [`SkybaseError::Storage`] on database error.
+    pub fn set_cursor(&self, cursor: u64) -> Result<()> {
+        self.set_meta("cursor", &cursor.to_string())
     }
 
     /// Retrieves an active (non-deleted) record by its canonical URI.
@@ -554,7 +744,7 @@ impl RecordStore {
         QueryBuilder::new(self, collection)
     }
 
-    /// Initiates a structured [`QueryBuilder`] scoped to the given collection NSID (alias for [`query`]).
+    /// Initiates a structured [`QueryBuilder`] scoped to the given collection NSID (alias for [`query`](Self::query)).
     #[must_use]
     pub fn collection(&self, collection: impl Into<String>) -> QueryBuilder<'_> {
         self.query(collection)
@@ -564,7 +754,7 @@ impl RecordStore {
     ///
     /// # Errors
     /// Returns [`SkybaseError::Storage`] or [`SkybaseError::Serialization`] on error.
-    pub fn query_raw(
+    pub(crate) fn query_raw(
         &self,
         sql: &str,
         params: &[rusqlite::types::Value],
@@ -583,6 +773,7 @@ impl RecordStore {
     ///
     /// # Errors
     /// Returns the result of `f`, or [`SkybaseError::Storage`] on internal error.
+    #[doc(hidden)]
     pub fn with_conn<R, F>(&self, f: F) -> Result<R>
     where
         F: FnOnce(&rusqlite::Connection) -> Result<R>,
@@ -709,8 +900,9 @@ mod tests {
         );
         store.upsert_record(&input).unwrap();
 
-        // Soft delete
-        store.soft_delete_record(&input.uri).unwrap();
+        // Soft delete with LWW timestamp 150 (greater than 100)
+        let deleted = store.soft_delete_record(&input.uri, 150).unwrap();
+        assert!(deleted);
         assert!(store.get_record(&input.uri).unwrap().is_none());
         assert!(
             store
@@ -720,7 +912,7 @@ mod tests {
                 .is_deleted
         );
 
-        // Re-upsert (resurrection)
+        // Re-upsert (resurrection with newer timestamp 200 >= 150)
         let input2 = RecordInput::new(
             "did:plc:bob",
             "app.bsky.feed.post",
@@ -762,7 +954,7 @@ mod tests {
             _ => panic!("Expected Upsert event"),
         }
 
-        store.soft_delete_record(&input.uri).unwrap();
+        store.soft_delete_record(&input.uri, 20).unwrap();
         let event2 = rx.try_recv().expect("Should receive delete notification");
         match event2 {
             ChangeNotification::Delete {
@@ -792,7 +984,7 @@ mod tests {
             1,
         );
         assert!(store.upsert_record(&input).is_ok());
-        assert!(store.soft_delete_record(&input.uri).is_ok());
+        assert!(store.soft_delete_record(&input.uri, 2).is_ok());
     }
 
     #[test]
@@ -878,5 +1070,120 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[test]
+    fn test_soft_delete_monotonic_barrier() {
+        let store = RecordStore::open_in_memory().unwrap();
+        let input = RecordInput::new(
+            "did:plc:lww",
+            "app.bsky.feed.post",
+            "post_1",
+            "cid_1",
+            serde_json::json!({"text": "original"}),
+            100,
+        );
+        store.upsert_record(&input).unwrap();
+
+        // 1. Soft delete at t=200
+        let res = store.soft_delete_record(&input.uri, 200).unwrap();
+        assert!(res, "Should successfully soft delete");
+        assert!(store.get_record(&input.uri).unwrap().is_none());
+
+        // 2. Replayed create at t=100 (stale) must NOT resurrect the record
+        store.upsert_record(&input).unwrap();
+        assert!(
+            store.get_record(&input.uri).unwrap().is_none(),
+            "Stale create at t=100 must not resurrect record deleted at t=200"
+        );
+
+        // 3. Stale delete at t=150 must be a no-op and return false
+        let stale_delete = store.soft_delete_record(&input.uri, 150).unwrap();
+        assert!(!stale_delete, "Stale delete must return false");
+
+        // 4. Newer create at t=300 resurrects the record
+        let input_new = RecordInput::new(
+            "did:plc:lww",
+            "app.bsky.feed.post",
+            "post_1",
+            "cid_2",
+            serde_json::json!({"text": "resurrected"}),
+            300,
+        );
+        store.upsert_record(&input_new).unwrap();
+        let row = store
+            .get_record(&input.uri)
+            .unwrap()
+            .expect("Newer create at t=300 must resurrect");
+        assert_eq!(row.cid, "cid_2");
+        assert_eq!(row.indexed_at, 300);
+    }
+
+    #[test]
+    fn test_persisted_cursor_and_meta() {
+        let store = RecordStore::open_in_memory().unwrap();
+        assert_eq!(store.get_cursor().unwrap(), None);
+
+        store.set_cursor(1_700_000_123_456).unwrap();
+        assert_eq!(store.get_cursor().unwrap(), Some(1_700_000_123_456));
+
+        // Update cursor
+        store.set_cursor(1_700_000_999_999).unwrap();
+        assert_eq!(store.get_cursor().unwrap(), Some(1_700_000_999_999));
+
+        // Arbitrary meta
+        assert_eq!(store.get_meta("some_key").unwrap(), None);
+        store.set_meta("some_key", "some_value").unwrap();
+        assert_eq!(
+            store.get_meta("some_key").unwrap(),
+            Some("some_value".to_string())
+        );
+    }
+
+    #[test]
+    fn test_apply_operations_batch_order_and_quarantine() {
+        let store = RecordStore::open_in_memory().unwrap();
+        let uri = "at://did:plc:batch/app.bsky.feed.post/1";
+
+        let op1 = StoreOperation::Upsert(RecordInput::new(
+            "did:plc:batch",
+            "app.bsky.feed.post",
+            "1",
+            "cid1",
+            serde_json::json!({"v": 1}),
+            100,
+        ));
+        let op2 = StoreOperation::Delete {
+            uri: uri.to_string(),
+            indexed_at: 200,
+        };
+        let op3 = StoreOperation::Upsert(RecordInput::new(
+            "did:plc:batch",
+            "app.bsky.feed.post",
+            "1",
+            "cid2",
+            serde_json::json!({"v": 2}),
+            300,
+        ));
+
+        // Execute batch in exact arrival order
+        let stats = store
+            .apply_operations_batch(&[op1, op2, op3], Some(500))
+            .unwrap();
+
+        assert_eq!(stats.upserted, 2);
+        assert_eq!(stats.deleted, 1);
+        assert_eq!(stats.skipped, 0);
+
+        // Record must be alive with v=2 at t=300
+        let record = store
+            .get_record(uri)
+            .unwrap()
+            .expect("Record must be alive");
+        assert_eq!(record.cid, "cid2");
+        assert_eq!(record.indexed_at, 300);
+
+        // Cursor must be persisted
+        assert_eq!(store.get_cursor().unwrap(), Some(500));
     }
 }

@@ -241,7 +241,7 @@ async fn test_tier4_scenario3_lifecycle_with_deletion_and_audit() {
     assert_eq!(updated_notes[0].cid, "cid_note_v2");
 
     // 3. Delete
-    store.soft_delete_record(uri).unwrap();
+    store.soft_delete_record(uri, 300).unwrap();
     let del_notification = bus_sub.try_recv().unwrap();
     assert!(matches!(
         del_notification,

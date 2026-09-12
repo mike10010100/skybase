@@ -23,9 +23,15 @@ pub enum QueryOp {
     Lt,
     /// Less than or equal to (`<=`).
     Lte,
-    /// Substring / pattern matching (`LIKE '%' || ? || '%'`).
+    /// Substring search within a string field (`LIKE %value%`).
+    ///
+    /// Wildcard characters (`%`, `_`, `\`) in the value are automatically escaped
+    /// using `\` as the escape character for literal substring matching.
     Contains,
-    /// Direct SQL LIKE pattern matching with user-supplied wildcards (`LIKE ?`).
+    /// Pattern matching using SQL `LIKE` syntax.
+    ///
+    /// Unlike [`Contains`](Self::Contains), wildcard characters (`%`, `_`) in the value
+    /// are NOT escaped and are evaluated directly by SQLite.
     Like,
 }
 
@@ -220,8 +226,16 @@ impl<'a> QueryBuilder<'a> {
                     params.push(json_to_sqlite_value(&clause.value));
                 }
                 QueryOp::Contains => {
-                    sql.push_str(" AND json_extract(record_json, ?) LIKE ('%' || ? || '%')");
-                    params.push(json_to_sqlite_value(&clause.value));
+                    sql.push_str(
+                        " AND json_extract(record_json, ?) LIKE ('%' || ? || '%') ESCAPE '\\'",
+                    );
+                    let val = match &clause.value {
+                        serde_json::Value::String(s) => {
+                            rusqlite::types::Value::Text(escape_like_literal(s))
+                        }
+                        other => json_to_sqlite_value(other),
+                    };
+                    params.push(val);
                 }
                 QueryOp::Like => {
                     sql.push_str(" AND json_extract(record_json, ?) LIKE ?");
@@ -335,7 +349,26 @@ pub fn normalize_json_path(path: &str) -> Result<String> {
     Ok(normalized)
 }
 
+/// Escapes SQL `LIKE` wildcard characters (`%`, `_`, and `\`) using `\` as the escape character.
+#[must_use]
+pub fn escape_like_literal(s: &str) -> String {
+    let mut escaped = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if ch == '%' || ch == '_' || ch == '\\' {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
+}
+
 fn validate_json_path(path: &str) -> Result<()> {
+    if path.starts_with('$') && path.len() > 1 && !path.starts_with("$.") && !path.starts_with("$[")
+    {
+        return Err(SkybaseError::Index(format!(
+            "JSON path starting with '$' must be followed by '.' or '[', got: '{path}'"
+        )));
+    }
     for (idx, ch) in path.chars().enumerate() {
         if idx == 0 && ch == '$' {
             continue;
@@ -412,7 +445,7 @@ mod tests {
         store.upsert_record(&r1).unwrap();
         store.upsert_record(&r2).unwrap();
         store.upsert_record(&r3).unwrap();
-        store.soft_delete_record(&r3.uri).unwrap();
+        store.soft_delete_record(&r3.uri, 3000).unwrap();
 
         store
     }
@@ -622,5 +655,54 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].uri, "at://did:plc:bob/app.bsky.feed.post/post2");
+    }
+
+    #[test]
+    fn test_contains_escapes_wildcards() {
+        let store = RecordStore::open_in_memory().unwrap();
+        let r1 = RecordInput::new(
+            "did:plc:test",
+            "app.bsky.feed.post",
+            "p1",
+            "cid1",
+            json!({"text": "Discount is 100% off today"}),
+            100,
+        );
+        let r2 = RecordInput::new(
+            "did:plc:test",
+            "app.bsky.feed.post",
+            "p2",
+            "cid2",
+            json!({"text": "1000 items in stock"}),
+            200,
+        );
+        store.upsert_record(&r1).unwrap();
+        store.upsert_record(&r2).unwrap();
+
+        // Searching for "100%" with Contains must find only r1, not r2
+        let rows = store
+            .query("app.bsky.feed.post")
+            .where_json("text", QueryOp::Contains, "100%")
+            .execute()
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].uri, r1.uri);
+
+        // Searching with Like without escaping "%" would match both if not anchored
+        let like_rows = store
+            .query("app.bsky.feed.post")
+            .where_json("text", QueryOp::Like, "%100%")
+            .execute()
+            .unwrap();
+        assert_eq!(like_rows.len(), 2);
+    }
+
+    #[test]
+    fn test_validate_json_path_rejects_dollar_foo() {
+        assert!(normalize_json_path("$foo").is_err());
+        assert!(normalize_json_path("$.foo").is_ok());
+        assert!(normalize_json_path("$[0]").is_ok());
+        assert!(normalize_json_path("foo").is_ok());
+        assert!(normalize_json_path("[0]").is_ok());
     }
 }

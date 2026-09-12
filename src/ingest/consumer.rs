@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use url::form_urlencoded;
 
 use crate::error::{Result, SkybaseError};
-use crate::index::RecordStore;
+use crate::index::{RecordStore, StoreOperation};
 use crate::ingest::backoff::BackoffManager;
 use crate::ingest::cursor::CursorTracker;
 use crate::ingest::events::{
@@ -382,6 +382,13 @@ impl JetstreamConsumer {
             return Ok(());
         }
 
+        // Resume from persisted SQLite cursor if not explicitly configured
+        if self.config.initial_cursor.is_none() && self.cursor.get() == 0 {
+            if let Ok(Some(persisted_cursor)) = self.store.get_cursor() {
+                self.cursor.force_rewind(persisted_cursor);
+            }
+        }
+
         let capacity = self.config.channel_capacity.max(1);
         let (tx, rx) = tokio::sync::mpsc::channel::<JetstreamCommit>(capacity);
         let mut join_set = tokio::task::JoinSet::new();
@@ -389,11 +396,20 @@ impl JetstreamConsumer {
         // 1. Spawn Storage Sync Worker Task
         let worker_store = self.store.clone();
         let worker_stats = Arc::clone(&self.stats);
+        let worker_cursor = Arc::clone(&self.cursor);
         let worker_token = cancel.child_token();
         let batch_size = self.config.batch_size;
 
         join_set.spawn(async move {
-            run_storage_sync_worker(rx, worker_store, worker_stats, batch_size, worker_token).await;
+            run_storage_sync_worker(
+                rx,
+                worker_store,
+                worker_stats,
+                batch_size,
+                worker_cursor,
+                worker_token,
+            )
+            .await;
             Ok(())
         });
 
@@ -446,9 +462,6 @@ pub struct JetstreamConsumerHandle {
 impl Drop for JetstreamConsumerHandle {
     fn drop(&mut self) {
         self.cancel.cancel();
-        if let Some(ref handle) = self.join_handle {
-            handle.abort();
-        }
     }
 }
 
@@ -456,6 +469,14 @@ impl JetstreamConsumerHandle {
     /// Signals the consumer to shut down cleanly.
     pub fn stop(&self) {
         self.cancel.cancel();
+    }
+
+    /// Aborts the background consumer task immediately.
+    pub fn abort(&self) {
+        self.cancel.cancel();
+        if let Some(ref handle) = self.join_handle {
+            handle.abort();
+        }
     }
 
     /// Awaits completion of the background consumer task.
@@ -587,22 +608,31 @@ async fn run_reader_reconnect_loop(
                                     if let Some(event) = parse_jetstream_frame(&text) {
                                         // Reset backoff on any valid frame received
                                         backoff.reset();
-                                        cursor.update(event.time_us());
 
-                                        if let JetstreamEvent::Commit(commit) = event {
-                                            // Edge filtering verification: ensure commit matches wanted collections
-                                            let matches_collection = config.wanted_collections.is_empty()
-                                                || config.wanted_collections.iter().any(|c| c == &commit.collection);
+                                        match event {
+                                            JetstreamEvent::Commit(commit) => {
+                                                // Edge filtering verification: ensure commit matches wanted collections
+                                                let matches_collection = config.wanted_collections.is_empty()
+                                                    || config.wanted_collections.iter().any(|c| c == &commit.collection);
 
-                                            let matches_did = config.wanted_dids.is_empty()
-                                                || config.wanted_dids.iter().any(|d| d == &commit.did);
+                                                let matches_did = config.wanted_dids.is_empty()
+                                                    || config.wanted_dids.iter().any(|d| d == &commit.did);
 
-                                            if matches_collection
-                                                && matches_did
-                                                && tx.send(commit).await.is_err()
-                                            {
-                                                // Storage worker terminated
-                                                return Ok(());
+                                                if matches_collection && matches_did {
+                                                    if tx.send(commit).await.is_err() {
+                                                        // Storage worker terminated
+                                                        return Ok(());
+                                                    }
+                                                } else {
+                                                    // Filtered out: commit will not go to store, so advance cursor directly
+                                                    cursor.update(commit.time_us);
+                                                }
+                                            }
+                                            JetstreamEvent::Heartbeat { time_us } => {
+                                                cursor.update(time_us);
+                                            }
+                                            JetstreamEvent::Other { time_us, .. } => {
+                                                cursor.update(time_us);
                                             }
                                         }
                                     }
@@ -657,6 +687,7 @@ async fn run_storage_sync_worker(
     store: RecordStore,
     stats: Arc<ConsumerStats>,
     batch_size: usize,
+    cursor: Arc<CursorTracker>,
     cancel: CancellationToken,
 ) {
     if batch_size <= 1 {
@@ -665,13 +696,13 @@ async fn run_storage_sync_worker(
             tokio::select! {
                 () = cancel.cancelled() => {
                     while let Ok(commit) = rx.try_recv() {
-                        apply_single_commit(&commit, &store, &stats);
+                        apply_single_commit(&commit, &store, &stats, &cursor);
                     }
                     break;
                 }
                 commit_opt = rx.recv() => {
                     match commit_opt {
-                        Some(commit) => apply_single_commit(&commit, &store, &stats),
+                        Some(commit) => apply_single_commit(&commit, &store, &stats, &cursor),
                         None => break,
                     }
                 }
@@ -686,22 +717,27 @@ async fn run_storage_sync_worker(
                     while let Ok(commit) = rx.try_recv() {
                         buffer.push(commit);
                     }
-                    flush_commit_batch(&mut buffer, &store, &stats);
+                    flush_commit_batch(&mut buffer, &store, &stats, &cursor);
                     break;
                 }
                 count = rx.recv_many(&mut buffer, batch_size) => {
                     if count == 0 {
-                        flush_commit_batch(&mut buffer, &store, &stats);
+                        flush_commit_batch(&mut buffer, &store, &stats, &cursor);
                         break;
                     }
-                    flush_commit_batch(&mut buffer, &store, &stats);
+                    flush_commit_batch(&mut buffer, &store, &stats, &cursor);
                 }
             }
         }
     }
 }
 
-fn apply_single_commit(commit: &JetstreamCommit, store: &RecordStore, stats: &ConsumerStats) {
+fn apply_single_commit(
+    commit: &JetstreamCommit,
+    store: &RecordStore,
+    stats: &ConsumerStats,
+    cursor: &CursorTracker,
+) {
     let uri = commit.uri();
     match commit.operation {
         CommitOperation::Create | CommitOperation::Update => {
@@ -713,6 +749,8 @@ fn apply_single_commit(commit: &JetstreamCommit, store: &RecordStore, stats: &Co
             match store.upsert_record(&input) {
                 Ok(()) => {
                     stats.records_upserted.fetch_add(1, Ordering::Relaxed);
+                    cursor.update(commit.time_us);
+                    let _ = store.set_cursor(commit.time_us);
                 }
                 Err(err) => {
                     stats.sync_errors.fetch_add(1, Ordering::Relaxed);
@@ -720,9 +758,16 @@ fn apply_single_commit(commit: &JetstreamCommit, store: &RecordStore, stats: &Co
                 }
             }
         }
-        CommitOperation::Delete => match store.soft_delete_record(&uri) {
-            Ok(()) => {
+        CommitOperation::Delete => match store.soft_delete_record(&uri, commit.time_us) {
+            Ok(true) => {
                 stats.records_deleted.fetch_add(1, Ordering::Relaxed);
+                cursor.update(commit.time_us);
+                let _ = store.set_cursor(commit.time_us);
+            }
+            Ok(false) => {
+                // Already deleted or stale delete ignored; still advance cursor
+                cursor.update(commit.time_us);
+                let _ = store.set_cursor(commit.time_us);
             }
             Err(err) => {
                 stats.sync_errors.fetch_add(1, Ordering::Relaxed);
@@ -736,49 +781,56 @@ fn flush_commit_batch(
     buffer: &mut Vec<JetstreamCommit>,
     store: &RecordStore,
     stats: &ConsumerStats,
+    cursor: &CursorTracker,
 ) {
-    let mut upserts = Vec::new();
-    let mut deletes = Vec::new();
+    if buffer.is_empty() {
+        return;
+    }
+
+    let mut operations = Vec::with_capacity(buffer.len());
+    let mut latest_cursor: Option<u64> = None;
 
     for commit in buffer.drain(..) {
+        latest_cursor = Some(latest_cursor.map_or(commit.time_us, |c| c.max(commit.time_us)));
+
         match commit.operation {
             CommitOperation::Create | CommitOperation::Update => {
                 if let Some(input) = commit.to_record_input(None) {
-                    upserts.push(input);
+                    operations.push(StoreOperation::Upsert(input));
                 } else {
                     stats.sync_errors.fetch_add(1, Ordering::Relaxed);
                     tracing::warn!(uri = %commit.uri(), "Ignoring commit with missing record payload");
                 }
             }
             CommitOperation::Delete => {
-                deletes.push(commit.uri());
+                operations.push(StoreOperation::Delete {
+                    uri: commit.uri(),
+                    indexed_at: commit.time_us,
+                });
             }
         }
     }
 
-    if !upserts.is_empty() {
-        let count = upserts.len() as u64;
-        match store.upsert_records_batch(&upserts) {
-            Ok(()) => {
-                stats.records_upserted.fetch_add(count, Ordering::Relaxed);
-            }
-            Err(err) => {
-                stats.sync_errors.fetch_add(count, Ordering::Relaxed);
-                tracing::error!("Failed to batch upsert records: {err}");
+    match store.apply_operations_batch(&operations, latest_cursor) {
+        Ok(batch_stats) => {
+            stats
+                .records_upserted
+                .fetch_add(batch_stats.upserted as u64, Ordering::Relaxed);
+            stats
+                .records_deleted
+                .fetch_add(batch_stats.deleted as u64, Ordering::Relaxed);
+            stats
+                .sync_errors
+                .fetch_add(batch_stats.skipped as u64, Ordering::Relaxed);
+            if let Some(cur) = latest_cursor {
+                cursor.update(cur);
             }
         }
-    }
-
-    if !deletes.is_empty() {
-        let count = deletes.len() as u64;
-        match store.soft_delete_records_batch(&deletes) {
-            Ok(()) => {
-                stats.records_deleted.fetch_add(count, Ordering::Relaxed);
-            }
-            Err(err) => {
-                stats.sync_errors.fetch_add(count, Ordering::Relaxed);
-                tracing::error!("Failed to batch soft-delete records: {err}");
-            }
+        Err(err) => {
+            stats
+                .sync_errors
+                .fetch_add(operations.len() as u64, Ordering::Relaxed);
+            tracing::error!("Failed to batch apply records: {err}");
         }
     }
 }

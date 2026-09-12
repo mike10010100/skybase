@@ -61,9 +61,10 @@ Every crate root enforces the strict compiler lint safety guard:
 - **Clock-Warp Safety**: Always compute elapsed time using `now.saturating_duration_since(earlier)` or `.map_or(0, ...)`. Never use raw `.duration_since()` as monotonic clocks can jump backwards under VM migrations or NTP syncs.
 - **Drift-Free Scheduling**: Recurring tasks (e.g. Jetstream cursor commits, cache evictions, token renewals) must calculate next runs relative to the previous anchor timestamp or use `tokio::time::interval`, not relative `Instant::now() + delay`.
 - **Never Hold Locks Across `.await` Points**: Synchronous mutex or `RwLock` guards must always be dropped before executing any `.await`, `sleep()`, or network I/O to prevent cooperative task starvation.
-- **SQLite WAL & Non-Blocking Partitioning**: Embedded SQLite storage operates in Write-Ahead Logging (WAL) mode with busy timeout handling, supporting concurrent read queries alongside atomic writes. High-concurrency live query fanout uses bounded, non-blocking broadcast channels (`tokio::sync::broadcast`).
+- **SQLite WAL & Concurrency**: Embedded SQLite storage operates in Write-Ahead Logging (WAL) mode with busy timeout handling and atomic transactions. In Phase 1.5, storage is protected by a thread-safe connection mutex with durable `_skybase_meta` cursor tracking; read-connection pooling is scheduled for the Phase 2 server gateway.
+- **Live Query Fanout**: High-concurrency live query fanout uses bounded, non-blocking broadcast channels (`tokio::sync::broadcast`) with clamped ring buffer capacities to eliminate memory exhaustion under slow subscribers.
 - **Task Leak Prevention & Cancellation**: All background tasks (firehose ingestion, event dispatching, health checkers) must be tracked in a managed `tokio::task::JoinSet` tied to a `tokio_util::sync::CancellationToken`. On shutdown or timeout, tasks must be cleanly aborted and joined.
-- **Panic Boundaries**: Worker tasks executing foreign or user-supplied event closures must wrap execution in `std::panic::AssertUnwindSafe(...).catch_unwind()`.
+- **Panic Boundaries (Roadmap)**: Planned for Phase 2 daemon event hooks; worker tasks executing foreign or user-supplied event closures will wrap execution in `std::panic::AssertUnwindSafe(...).catch_unwind()`. In Phase 1.5, zero panics are strictly enforced via compiler safety lints without arbitrary runtime closures.
 
 ### 6. 100% Documentation Coverage
 - All public structs, fields, constants, enums, modules, and functions must have descriptive documentation comments (`missing_docs` is denied).

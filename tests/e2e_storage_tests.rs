@@ -111,7 +111,9 @@ fn test_tier1_f04_soft_delete_and_hard_delete() {
     store.upsert_record(&record).expect("upsert failed");
 
     // Soft delete
-    store.soft_delete_record(uri).expect("soft delete failed");
+    store
+        .soft_delete_record(uri, 1700000002)
+        .expect("soft delete failed");
     assert!(store.get_record(uri).expect("get failed").is_none());
     let fetched_soft = store
         .get_record_including_deleted(uri)
@@ -305,7 +307,7 @@ fn test_tier1_f08_broadcast_bus_subscription_and_delivery() {
 
     // Soft delete emits delete notification
     store
-        .soft_delete_record(&record.uri)
+        .soft_delete_record(&record.uri, 12346)
         .expect("soft delete failed");
     let del_event1 = rx1.try_recv().expect("rx1 del receive failed");
     match del_event1 {
@@ -528,7 +530,9 @@ fn test_tier2_b06_soft_deleted_record_resurrection_on_upsert() {
     store.upsert_record(&initial).expect("upsert failed");
 
     // Soft delete
-    store.soft_delete_record(uri).expect("soft delete failed");
+    store
+        .soft_delete_record(uri, 150)
+        .expect("soft delete failed");
     assert!(store.get_record(uri).expect("get failed").is_none());
     let soft_del = store
         .get_record_including_deleted(uri)
@@ -625,7 +629,7 @@ fn test_tier3_p02_soft_delete_query_filtering_and_include_deleted_toggle() {
         .expect("upsert failed");
 
     store
-        .soft_delete_record("at://did:plc:user/toggle.col/deleted")
+        .soft_delete_record("at://did:plc:user/toggle.col/deleted", 250)
         .expect("soft delete failed");
 
     // Default query excludes deleted

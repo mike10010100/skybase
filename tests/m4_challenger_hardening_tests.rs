@@ -1214,10 +1214,16 @@ fn test_challenger_query_like_with_sorting_pagination_and_soft_delete() {
 
     // Soft delete post #3 and #7
     store
-        .soft_delete_record("at://did:plc:pagination/app.bsky.feed.post/page_post_3")
+        .soft_delete_record(
+            "at://did:plc:pagination/app.bsky.feed.post/page_post_3",
+            1003,
+        )
         .expect("soft delete failed");
     store
-        .soft_delete_record("at://did:plc:pagination/app.bsky.feed.post/page_post_7")
+        .soft_delete_record(
+            "at://did:plc:pagination/app.bsky.feed.post/page_post_7",
+            1007,
+        )
         .expect("soft delete failed");
 
     // 1. Default query with LIKE: excludes soft-deleted records (8 active remain)

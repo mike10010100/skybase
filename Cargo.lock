@@ -1596,8 +1596,6 @@ dependencies = [
 name = "skybase"
 version = "0.1.0"
 dependencies = [
- "ahash",
- "async-trait",
  "axum",
  "futures-util",
  "parking_lot",

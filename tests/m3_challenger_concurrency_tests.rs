@@ -934,7 +934,7 @@ async fn test_challenger_expired_session_fails_closed_without_network() {
     )
     .expect("session creation");
 
-    let client = PdsRepoClient::from_session(Arc::new(session));
+    let client = PdsRepoClient::from_session(Arc::new(session)).expect("from_session");
 
     let res = client
         .create_record("app.bsky.feed.post", Some("post_1"), &json!({}), false)

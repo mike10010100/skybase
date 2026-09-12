@@ -941,7 +941,10 @@ async fn test_adv_record_store_integrated_broadcast_and_query_stress() {
     // Soft delete all 200
     for i in 0..count {
         store
-            .soft_delete_record(&format!("at://did:plc:concurrent/{coll}/k_{i}"))
+            .soft_delete_record(
+                &format!("at://did:plc:concurrent/{coll}/k_{i}"),
+                (i + 1000) as u64,
+            )
             .expect("soft delete");
     }
 

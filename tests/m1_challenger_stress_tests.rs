@@ -208,7 +208,9 @@ async fn test_challenger_tombstone_resurrection_lifecycle_and_notifications() {
     }
 
     // Cycle 2: Soft Delete
-    store.soft_delete_record(uri).expect("soft delete failed");
+    store
+        .soft_delete_record(uri, 1100)
+        .expect("soft delete failed");
 
     // Verify Cycle 2 state: active get returns None, get_including_deleted returns row with is_deleted=true
     assert!(store.get_record(uri).expect("get failed").is_none());
@@ -256,7 +258,7 @@ async fn test_challenger_tombstone_resurrection_lifecycle_and_notifications() {
 
     // Cycle 3: Idempotent Soft Delete (deleting an already deleted record)
     store
-        .soft_delete_record(uri)
+        .soft_delete_record(uri, 1200)
         .expect("second soft delete failed");
     // Should NOT emit a duplicate Delete event
     assert!(
@@ -301,7 +303,9 @@ async fn test_challenger_tombstone_resurrection_lifecycle_and_notifications() {
     }
 
     // Cycle 5: Second Soft Delete
-    store.soft_delete_record(uri).expect("soft delete 2 failed");
+    store
+        .soft_delete_record(uri, 2500)
+        .expect("soft delete 2 failed");
     assert!(store.get_record(uri).expect("get failed").is_none());
     let event4 = rx.try_recv().expect("event4 missing");
     assert!(event4.is_delete());
@@ -355,9 +359,9 @@ async fn test_challenger_concurrent_tombstone_resurrection_race() {
     });
 
     let deleter_handle = tokio::spawn(async move {
-        for _ in 0..cycles {
+        for i in 0..cycles {
             store_deleter
-                .soft_delete_record(uri)
+                .soft_delete_record(uri, 1000 + i as u64)
                 .expect("race soft delete");
             tokio::task::yield_now().await;
         }
@@ -1029,7 +1033,9 @@ async fn test_challenger_concurrent_tombstones_and_pagination() {
         store.upsert_record(&input).expect("insert");
 
         if i % delete_interval == 0 {
-            store.soft_delete_record(&input.uri).expect("delete");
+            store
+                .soft_delete_record(&input.uri, i as u64)
+                .expect("delete");
         }
     }
 

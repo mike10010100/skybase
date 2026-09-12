@@ -42,7 +42,7 @@ impl CursorTracker {
     ///
     /// Returns `true` if `time_us` was strictly greater than the recorded watermark
     /// and the watermark was advanced; returns `false` if `time_us` was stale, equal,
-    /// or zero.
+    /// zero, or exceeded the future sanity threshold.
     pub fn update(&self, time_us: u64) -> bool {
         if time_us == 0 {
             return false;
@@ -69,8 +69,13 @@ impl CursorTracker {
     }
 
     /// Forces the cursor watermark to a specific value (e.g., for deliberate replay or rewind).
-    pub fn set(&self, val: u64) {
+    pub fn force_rewind(&self, val: u64) {
         self.watermark.store(val, Ordering::SeqCst);
+    }
+
+    /// Alias for [`force_rewind`](Self::force_rewind).
+    pub fn set(&self, val: u64) {
+        self.force_rewind(val);
     }
 }
 

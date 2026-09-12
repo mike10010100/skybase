@@ -197,12 +197,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - [x] **Phase 1.5: The Vertical Slice Wedge (Completed)**
   - Proven single end-to-end loop: DPoP login → PDS write → Jetstream ingest → SQLite WAL upsert → JSON1 query → live query broadcast notification.
   - Canonical `records` SQLite schema with JSON1 extraction and structured query builder (`skybase::index`; FTS5 full-text indexing scheduled for Phase 2).
-  - Resilient WebSocket Jetstream consumer with edge filtering, monotonic cursor, and mock test emitter (`skybase::ingest`).
-  - Sovereign PDS write client with DPoP proof signing and automatic nonce retry (`skybase::repo`).
-  - Hermetic integration test suite (`tests/vertical_slice_tests.rs`) and 12 test suites with 258 passing unit, integration, and stress tests.
+  - Monotonic Last-Write-Wins (LWW) soft-delete barrier and in-order batch execution preventing deleted records from resurrecting on firehose replayed commits.
+  - Resilient WebSocket Jetstream consumer with edge filtering, durable cursor persistence in `_skybase_meta`, monotonic timestamp clamping, and mock test emitter (`skybase::ingest`).
+  - Sovereign PDS write client with DPoP proof signing, strict redirect prevention, and automatic nonce retry (`skybase::repo`).
+  - Hermetic integration test suite (`tests/vertical_slice_tests.rs`) and 12 challenger/e2e test suites with 272 passing tests (94 unit, 175 integration, 3 doc-tests).
 - [ ] **Phase 2: Micro-AppView Ingestion & Historical Backfill**
   - FTS5 contentless/external-content full-text search integration.
-  - Multi-collection filtering and disk-backed cursor persistence.
+  - Multi-collection filtering and multi-reader SQLite connection pooling.
   - Historical CAR sync crawler (`com.atproto.sync.getRepo`).
   - Dynamic index generation from Lexicon schema manifests.
 - [ ] **Phase 3: Realtime Subscriptions & Admin Dashboard**

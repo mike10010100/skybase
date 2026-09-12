@@ -114,8 +114,8 @@ impl Default for BroadcastBus {
     }
 }
 
-/// Maximum allowed capacity for the in-memory broadcast ring buffer (1,000,000 events).
-pub const MAX_BROADCAST_CAPACITY: usize = 1_000_000;
+/// Maximum allowed capacity for the in-memory broadcast ring buffer (65,536 events).
+pub const MAX_BROADCAST_CAPACITY: usize = 65_536;
 
 impl BroadcastBus {
     /// Creates a new broadcast bus with the given channel ring buffer capacity.

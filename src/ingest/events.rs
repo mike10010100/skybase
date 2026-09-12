@@ -10,20 +10,12 @@ use serde::{Deserialize, Serialize};
 use crate::error::Result;
 use crate::index::{RecordInput, RecordStore};
 
-/// Normalizes a Jetstream microsecond timestamp into seconds if needed.
-///
-/// Preserves or normalizes timestamps into canonical microseconds (`time_us`).
+/// Returns the Jetstream event timestamp in microseconds.
 ///
 /// In ATProto Jetstream, event timestamps are natively microsecond precision.
-/// If a non-zero timestamp is provided in seconds (< 10^11), it is scaled to microseconds.
-/// Microsecond values (>= 10^11) are preserved directly with full sub-second fidelity.
 #[must_use]
 pub const fn normalize_indexed_at(time_us: u64) -> u64 {
-    if time_us > 0 && time_us < 100_000_000_000 {
-        time_us.saturating_mul(1_000_000)
-    } else {
-        time_us
-    }
+    time_us
 }
 
 /// Commit operation type for Jetstream repository events.
@@ -227,6 +219,13 @@ pub fn parse_jetstream_frame(text: &str) -> Option<JetstreamEvent> {
     };
 
     let time_us = msg.time_us.unwrap_or(0);
+    if time_us > 0 && !is_valid_time_us(time_us) {
+        tracing::debug!(
+            time_us,
+            "Discarding frame with far-future or poisoned timestamp"
+        );
+        return None;
+    }
 
     // Case 1: Commit event
     if msg.kind.as_deref() == Some("commit") {
@@ -254,8 +253,11 @@ pub fn parse_jetstream_frame(text: &str) -> Option<JetstreamEvent> {
             }
         };
 
-        if commit.collection.trim().is_empty() || commit.rkey.trim().is_empty() {
-            tracing::debug!("Discarding commit with empty collection or rkey");
+        if !is_valid_did(&did)
+            || !is_valid_collection(&commit.collection)
+            || crate::repo::validate_rkey(&commit.rkey).is_err()
+        {
+            tracing::debug!("Discarding commit with malformed did, collection, or rkey");
             return if time_us > 0 {
                 Some(JetstreamEvent::Heartbeat { time_us })
             } else {
@@ -308,6 +310,58 @@ pub fn parse_jetstream_frame(text: &str) -> Option<JetstreamEvent> {
     None
 }
 
+pub(crate) const MAX_FUTURE_SKEW_US: u64 = 5 * 365 * 86_400 * 1_000_000;
+
+pub(crate) fn is_valid_time_us(time_us: u64) -> bool {
+    let now_us = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_micros() as u64);
+    if now_us > 0 && time_us > now_us.saturating_add(MAX_FUTURE_SKEW_US) {
+        return false;
+    }
+    true
+}
+
+fn is_valid_did(did: &str) -> bool {
+    let trimmed = did.trim();
+    if !trimmed.starts_with("did:") || trimmed.len() < 7 {
+        return false;
+    }
+    if trimmed.split(':').count() < 3 {
+        return false;
+    }
+    for ch in trimmed.chars() {
+        if !ch.is_ascii_alphanumeric()
+            && ch != ':'
+            && ch != '.'
+            && ch != '_'
+            && ch != '-'
+            && ch != '%'
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_valid_collection(coll: &str) -> bool {
+    let trimmed = coll.trim();
+    if trimmed.is_empty() || trimmed.len() > 317 || !trimmed.contains('.') {
+        return false;
+    }
+    for part in trimmed.split('.') {
+        if part.is_empty() {
+            return false;
+        }
+        for ch in part.chars() {
+            if !ch.is_ascii_alphanumeric() && ch != '-' {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Parses the microsecond timestamp from a raw Jetstream frame without requiring a full commit structure.
 #[must_use]
 pub fn parse_frame_timestamp(text: &str) -> Option<u64> {
@@ -327,8 +381,8 @@ pub fn parse_jetstream_commit(text: &str) -> Option<JetstreamCommit> {
 ///
 /// - For [`CommitOperation::Create`] and [`CommitOperation::Update`], the record is upserted,
 ///   unmarking any previous soft-deletion tombstone and emitting an `Upsert` change notification.
-/// - For [`CommitOperation::Delete`], the record is soft-deleted (`is_deleted = 1`) and a `Delete`
-///   notification is emitted across the broadcast bus.
+/// - For [`CommitOperation::Delete`], the record is soft-deleted (`is_deleted = 1`) with monotonic LWW timestamp
+///   and a `Delete` notification is emitted across the broadcast bus if active.
 ///
 /// # Errors
 /// Returns [`crate::error::SkybaseError::Storage`] or [`crate::error::SkybaseError::Serialization`] if the SQLite mutation fails.
@@ -346,7 +400,7 @@ pub fn sync_commit_to_store(store: &RecordStore, commit: &JetstreamCommit) -> Re
             store.upsert_record(&input)?;
         }
         CommitOperation::Delete => {
-            store.soft_delete_record(&uri)?;
+            store.soft_delete_record(&uri, commit.time_us)?;
         }
     }
 

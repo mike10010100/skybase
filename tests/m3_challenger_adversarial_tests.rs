@@ -1085,7 +1085,7 @@ async fn test_adv_expired_session_fails_fast_zero_network() {
     tokio::time::sleep(Duration::from_millis(5)).await;
     assert!(session.is_expired(), "Session must be marked expired");
 
-    let client = PdsRepoClient::from_session(Arc::new(session));
+    let client = PdsRepoClient::from_session(Arc::new(session)).expect("from_session");
 
     let res = client
         .create_record(

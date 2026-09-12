@@ -25,8 +25,6 @@ skyauth = { path = "../skyauth", version = "0.3" }
 tokio = { version = "1.40", default-features = false, features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
 tokio-util = "0.7"
 parking_lot = "0.12"
-ahash = "0.8"
-async-trait = "0.1"
 
 # Serialization & JSON
 serde = { version = "1.0", features = ["derive"] }

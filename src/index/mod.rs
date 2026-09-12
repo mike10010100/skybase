@@ -10,4 +10,7 @@ pub mod store;
 
 pub use broadcast::{BroadcastBus, ChangeNotification, DEFAULT_BROADCAST_CAPACITY};
 pub use query::{QueryBuilder, QueryOp, SortDirection};
-pub use store::{parse_at_uri, RecordInput, RecordRow, RecordStore, RecordStoreConfig};
+pub use store::{
+    parse_at_uri, BatchStats, RecordInput, RecordRow, RecordStore, RecordStoreConfig,
+    StoreOperation,
+};

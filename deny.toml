@@ -97,7 +97,6 @@ allow = [
     "ISC",
     "Unicode-3.0",
     "Unicode-DFS-2016",
-    "OpenSSL",
     "Zlib",
     "CC0-1.0",
     "CDLA-Permissive-2.0",

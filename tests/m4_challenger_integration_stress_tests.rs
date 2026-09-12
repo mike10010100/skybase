@@ -1253,7 +1253,7 @@ async fn test_challenger_file_backed_wal_concurrent_hammer_with_facade() {
                         // Soft delete an older item
                         if ops > 0 {
                             let del_uri = format!("at://{did}/com.hammer.item/k_{}", ops - 1);
-                            let _ = skybase_clone.require_store().unwrap().soft_delete_record(&del_uri);
+                            let _ = skybase_clone.require_store().unwrap().soft_delete_record(&del_uri, ops as u64);
                         }
                     }
                     _ => {

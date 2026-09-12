@@ -76,30 +76,19 @@ impl PdsRepoClient {
     /// Creates a new `PdsRepoClient` wrapping an authenticated [`OAuthSession`] and [`AtprotoOAuthClient`].
     ///
     /// Borrows and shares the [`DPoPNonceCache`] from the OAuth client.
-    #[must_use]
-    pub fn new(session: Arc<OAuthSession>, client: Arc<AtprotoOAuthClient>) -> Self {
-        Self::try_new(session.clone(), client.clone()).unwrap_or_else(|_| {
-            let nonce_cache = client.nonce_cache().clone();
-            Self {
-                session,
-                oauth_client: Some(client),
-                http_client: Client::new(),
-                nonce_cache,
-                endpoint_override: None,
-            }
-        })
+    ///
+    /// # Errors
+    /// Returns [`SkybaseError::Network`] if HTTP client creation fails.
+    pub fn new(session: Arc<OAuthSession>, client: Arc<AtprotoOAuthClient>) -> Result<Self> {
+        Self::try_new(session, client)
     }
 
     /// Creates a `PdsRepoClient` directly from an [`OAuthSession`] with a fresh [`DPoPNonceCache`].
-    #[must_use]
-    pub fn from_session(session: Arc<OAuthSession>) -> Self {
-        Self::try_from_session(session.clone()).unwrap_or_else(|_| Self {
-            session,
-            oauth_client: None,
-            http_client: Client::new(),
-            nonce_cache: DPoPNonceCache::new(),
-            endpoint_override: None,
-        })
+    ///
+    /// # Errors
+    /// Returns [`SkybaseError::Network`] if HTTP client creation fails.
+    pub fn from_session(session: Arc<OAuthSession>) -> Result<Self> {
+        Self::try_from_session(session)
     }
 
     /// Convenience constructor creating an internal [`OAuthSession`] for manual credentials or testing.
@@ -122,7 +111,7 @@ impl PdsRepoClient {
             None,
             "DPoP",
             None,
-            Some(3600),
+            None,
             skyauth::dpop::DPoPKey::generate(),
             Some(endpoint),
             None,
@@ -584,7 +573,7 @@ mod tests {
         )
         .expect("session creation failed");
 
-        let client = PdsRepoClient::from_session(Arc::new(session));
+        let client = PdsRepoClient::from_session(Arc::new(session)).expect("client creation");
         assert!(client.pds_endpoint().is_err());
     }
 

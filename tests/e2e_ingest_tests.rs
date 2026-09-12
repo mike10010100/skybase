@@ -386,7 +386,9 @@ async fn test_tier3_p01_ingest_mutation_lifecycle_create_update_delete() {
     }
 
     // 3. Ingest Delete
-    store.soft_delete_record(&uri).expect("soft delete failed");
+    store
+        .soft_delete_record(&uri, 3000)
+        .expect("soft delete failed");
     let event3 = sub.try_recv().expect("event3 failed");
     match event3 {
         ChangeNotification::Delete { uri: u, .. } => assert_eq!(u, uri),
