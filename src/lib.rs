@@ -1,14 +1,19 @@
 //! # `skybase`
 //!
-//! **The Open-Source Backend & Developer Platform for the AT Protocol.**
+//! **The Turn-Key Micro-AppView Engine & Developer Platform for the AT Protocol.**
 //!
-//! `skybase` is the "Firebase for ATProto" — a modular, high-performance, `#![forbid(unsafe_code)]`
-//! backend framework and SDK suite designed to make building decentralized applications on the AT Protocol
-//! as simple as building on traditional cloud platforms.
+//! `skybase` brings Firebase-like developer ergonomics to the decentralized AT Protocol ecosystem.
+//! Rather than forcing developers to hand-roll custom firehose consumers, backfill pipelines, and
+//! database schemas, `skybase` provides a turn-key, single-binary Micro-AppView engine that ingests
+//! Bluesky Jetstream commits, indexes them into embedded SQLite WAL with JSON1 virtual columns and
+//! FTS5 full-text search, and serves real-time REST and WebSocket live queries down to clients.
 //!
-//! Powered by [`skyauth`], `skybase` integrates decentralized OAuth 2.1, DPoP (RFC 9449), PKCE (RFC 7636),
-//! sovereign repository (MST) operations, micro-AppView firehose indexing, blob media management, and
-//! reactive event triggers into an ergonomic, unified developer platform.
+//! Powered by [`skyauth`], `skybase` supports three distinct operating topologies:
+//! - **Topology A (Client-Sovereign / Zero Custody)**: Client applications write directly to user PDSs;
+//!   `skybase` acts as a zero-custody read and indexing engine holding zero private credentials.
+//! - **Topology B (Daemon-Managed / Bots)**: Server-side daemons hold DPoP sessions with AES-256-GCM encryption at rest.
+//! - **Topology C (Token-Mediated Session Proxy)**: Mediates confidential OAuth sessions for static frontends
+//!   (GitHub Pages, Wisp, Tangled) to prevent 2-week session dropouts.
 
 #![forbid(unsafe_code)]
 #![deny(

@@ -81,9 +81,10 @@ Every crate root enforces the strict compiler lint safety guard:
   $$\text{DPoP Login} \longrightarrow \text{PDS write} \longrightarrow \text{Jetstream Ingest} \longrightarrow \text{SQLite Upsert} \longrightarrow \text{Live Query}$$
   De-risk this single loop end-to-end before expanding to peripheral pillars.
 
-### 9. Two Operating Topologies & Honest Custody Boundaries
+### 9. Three Operating Topologies & Honest Custody Boundaries
 - **Topology A (Client-Sovereign, Zero Custody)**: The default for web and mobile frontends. Authentication and writes go directly from the client device to the user's PDS. `skybase` indexes public commits from Jetstream into SQLite WAL. **Skybase holds zero user credentials.**
 - **Topology B (Daemon-Custodial)**: Used for autonomous bots and feed generators. In this mode, the daemon is an OAuth credential custodian. All refresh tokens and private keys stored at rest must be encrypted using **AES-256-GCM** (`SKYBASE_MASTER_KEY`).
+- **Topology C (Token-Mediated Session Proxy)**: Used for static single-page apps hosted on GitHub Pages, Wisp, or Tangled. Skybase mediates confidential OAuth sessions, maintaining background refresh token rotation so user sessions remain active indefinitely (>2 weeks) without browser storage eviction killing logins.
 
 ---
 

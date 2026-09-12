@@ -14,7 +14,7 @@
 | **The Strategic Wedge** | **The Single-Binary Micro-AppView**: Download one static binary (`./skybase`). Point it at your collection NSID (`com.myapp.review`). It continuously ingests Jetstream, stores records in an embedded SQLite WAL database with JSON1 virtual columns and FTS5 full-text search, and serves an instant REST & WebSocket live-query API. |
 | **Three Operating Topologies** | **Topology A (Client-Sovereign / Zero Custody - Default)**: Browser/mobile app authenticates and writes directly to user PDS via `@atproto/oauth-client-browser`; Skybase runs as a zero-custody read indexer (holds 0 credentials).<br/>**Topology B (Daemon-Managed / Bots)**: Server-side daemons hold DPoP sessions via `skyauth` with AES-256-GCM token encryption at rest.<br/>**Topology C (Token-Mediated Session Proxy)**: Keeps sessions alive indefinitely (>2 weeks) for static frontends hosted on GitHub Pages, Wisp, or Tangled. |
 | **Developer Experience** | Firestore-like developer ergonomics via `@skybase/client` TypeScript SDK:<br/>`skybase.collection('com.myapp.review').where('rating', '>=', 4).orderBy('date').onSnapshot(setReviews)`.<br/>No Rust toolchain required for frontend developers. |
-| **Immediate Focus** | **Phase 1.5: The Thin Vertical Slice**: Prove the end-to-end loop ( ightarrow PDS ightarrow Jetstream ightarrow SQLite ightarrow Live Query$) on a single collection with Criterion benchmarks before broad expansion. |
+| **Immediate Focus** | **Phase 1.5: The Thin Vertical Slice**: Prove the end-to-end loop (DPoP Login → PDS Write → Jetstream Ingest → SQLite Upsert → Live Query) on a single collection with Criterion benchmarks before broad expansion. |
 
 ---
 
@@ -216,7 +216,7 @@ flowchart TD
 ```
 
 ### 4.2 The Sovereign Write & Optimistic Reconciliation Flow
-ATProto commits take 50ms–500ms to propagate from PDS $ightarrow$ Relay $ightarrow$ Jetstream $ightarrow$ Micro-AppView $ightarrow$ Client. Skybase resolves this eventual consistency gap with the **Optimistic State Reconciliation Protocol**:
+ATProto commits take 50ms–500ms to propagate from PDS → Relay → Jetstream → Micro-AppView → Client. Skybase resolves this eventual consistency gap with the **Optimistic State Reconciliation Protocol**:
 
 ```mermaid
 sequenceDiagram
@@ -426,7 +426,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - [ ] Build minimal Jetstream WebSocket consumer filtering for the single target collection.
 - [ ] Build minimal `createRecord` client using `skyauth` DPoP signing.
 - [ ] Execute hermetic integration test:
-  44661	ext{DPoP Login} \longrightarrow 	ext{createRecord (PDS)} \longrightarrow 	ext{Jetstream Ingest} \longrightarrow 	ext{SQLite Upsert} \longrightarrow 	ext{.where().limit() Query} \longrightarrow 	ext{WebSocket Event}44661
+  $$\text{DPoP Login} \longrightarrow \text{createRecord (PDS)} \longrightarrow \text{Jetstream Ingest} \longrightarrow \text{SQLite Upsert} \longrightarrow \text{.where().limit() Query} \longrightarrow \text{WebSocket Event}$$
 - [ ] Measure and record empirical baseline benchmarks (ingest throughput, memory usage, query latency) with Criterion.
 
 ### Phase 2: Production Micro-AppView & Local Dev Sandbox (Tier 1 Core Wedge)

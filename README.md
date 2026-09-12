@@ -11,7 +11,7 @@
 
 ## 🌟 Highlights
 
-- **The Strategic Wedge: Micro-AppView in One Binary**: Point `./skybase` at your collection NSID (`com.myapp.review`). It continuously ingests Jetstream, stores records in an embedded SQLite WAL database with full-text search (FTS5), and serves an instant REST & WebSocket query API.
+- **The Strategic Wedge: Micro-AppView in One Binary**: Point `./skybase` at your collection NSID (`com.myapp.review`). It continuously ingests Jetstream, stores records in an embedded SQLite WAL database with JSON1 virtual columns and full-text search (FTS5), and serves an instant REST & WebSocket live query API.
 - **Zero Token Custody by Default**: Frontends authenticate and write directly to user PDSs via `@atproto/oauth-client-browser`. `skybase` indexes public commits from Jetstream, holding **zero user refresh tokens or private keys**.
 - **Hermetic Local Dev Sandbox (`skybase dev --mock`)**: Mock relay and synthetic Jetstream event replay engine allowing you to build and test full-stack ATProto apps offline with zero cloud configuration.
 - **Eventual Consistency with Optimistic UX**: The `@skybase/client` SDK provides deterministic TID tracking and optimistic reconciliation (`isPending`, `isOptimistic`, `isLagging`) so React/Vue components never flicker or drop mutations.
@@ -38,13 +38,78 @@
 
 ---
 
+## 🥊 Why Skybase? (Prior Art Comparison)
+
+| Existing Tool | What It Does | Why It Is Insufficient / Where `skybase` Wins |
+| :--- | :--- | :--- |
+| **`@atproto/api`** | Official TypeScript XRPC client. | Only speaks to **one user's PDS at a time**. Has no database, cannot perform cross-user queries, and cannot build an aggregated feed or search index. |
+| **`@atproto/oauth-client-*`** | Official TypeScript OAuth client. | Handles login flows, but provides zero data storage, firehose indexing, or query infrastructure. |
+| **Bluesky's `Tap`** | Internal Go tool for filtering the raw firehose with backfill. | A low-level streaming pipe (event bus). It does **not** give you a queryable database, REST API, SQLite storage, or WebSocket push subscriptions. |
+| **`skyware/jetstream`** | Node.js WebSocket client for Jetstream. | A raw WebSocket listener. You still have to hand-roll SQLite schemas, JSON parsing, cursor tracking, deduplication, and query endpoints. |
+| **`HappyView`** | Lexicon-driven AppView server in Rust. | Focuses on runtime schema reflection and Lua scripting. Uses `atrium-oauth`. It is an AppView server, not an ergonomic BaaS/developer SDK. |
+| **`skybase`** | **Complete Micro-AppView in one binary.** | Combines Jetstream ingestion + historical PDS backfill + SQLite WAL storage + JSON1 virtual indexes + FTS5 full-text search + REST/WebSocket live queries in a single prebuilt binary with zero configuration. |
+
+---
+
+## 🏛️ The Three Operating Topologies
+
+To eliminate the conflict between "user data sovereignty" and practical backend operations, `skybase` explicitly supports three distinct operational topologies:
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                  THREE OPERATING TOPOLOGIES                                     │
+├──────────────────────────┬──────────────────────────┬───────────────────────────────────────────┤
+│ Topology                 │ Custodial Footprint      │ Primary Use Case                          │
+├──────────────────────────┼──────────────────────────┼───────────────────────────────────────────┤
+│ Topology A: Client-      │ ZERO Token Custody.      │ Default for Web (React/Next.js) & Mobile  │
+│ Sovereign (Default)      │ Skybase holds 0 keys.    │ apps. Writes go direct from client to PDS.│
+├──────────────────────────┼──────────────────────────┼───────────────────────────────────────────┤
+│ Topology B: Daemon-      │ Managed Custody. Tokens  │ Background daemons, automated bots, and   │
+│ Managed (Bots/Daemons)   │ encrypted with AES-256.  │ feed generators requiring offline writes. │
+├──────────────────────────┼──────────────────────────┼───────────────────────────────────────────┤
+│ Topology C: Token-       │ Session Proxy. Confident-│ Static SPAs on GitHub Pages, Wisp, and    │
+│ Mediated Session Broker  │ ial refresh rotation.    │ Tangled. Eliminates 2-week session drop.  │
+└──────────────────────────┴──────────────────────────┴───────────────────────────────────────────┘
+```
+
+1. **Topology A: Client-Sovereign (Zero Custody — Default)**:
+   The user logs in via `@atproto/oauth-client-browser`. DPoP private keys remain strictly in browser IndexedDB. Writes are dispatched directly from the client to the user's personal PDS. `skybase` operates purely as a read/indexing Micro-AppView consuming public Jetstream commits. **Skybase holds zero user credentials.**
+2. **Topology B: Daemon-Managed (Backend Automation & Bots)**:
+   Used when an autonomous backend service or bot must sign repository commits without a user present. Powered by [`skyauth`], all refresh tokens and private keys stored at rest are encrypted using **AES-256-GCM** (`SKYBASE_MASTER_KEY`).
+3. **Topology C: Token-Mediated Session Proxy (Static Hosting)**:
+   Addresses the major pain point for static apps on GitHub Pages, Wisp, or Tangled where public-client OAuth sessions expire after ~2 weeks. Skybase acts as a confidential OAuth session proxy, rotating refresh tokens continuously in the background so static apps stay logged in indefinitely.
+
+---
+
+## 🌐 The Deployment Spectrum: Localhost to Cloud
+
+```text
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                               THE DEPLOYMENT SPECTRUM                                  │
+├──────────────────────┬─────────────────────────┬───────────────────────────────────────┤
+│ Tier                 │ Target Audience         │ What Runs Where                       │
+├──────────────────────┼─────────────────────────┼───────────────────────────────────────┤
+│ Level 0: Local Dev   │ Development / Offline   │ `npx skybase dev` runs on localhost;  │
+│                      │                         │ embedded SQLite + mock Jetstream      │
+├──────────────────────┼─────────────────────────┼───────────────────────────────────────┤
+│ Level 1: 1-Click     │ Independent builders,   │ Single binary on Fly.io / Railway /   │
+│ Self-Hosted          │ open-source projects    │ VPS ($5/mo); 1-click config templates │
+├──────────────────────┼─────────────────────────┼───────────────────────────────────────┤
+│ Level 2: Managed     │ Static frontend apps    │ Multi-tenant hosted Micro-AppView     │
+│ "Skybase Cloud"      │ (GitHub Pages, Tangled, │ cloud; developers register NSIDs and  │
+│ [Strategic Horizon]  │ Wisp, Vercel, Netlify)  │ get instant managed API endpoints     │
+└──────────────────────┴─────────────────────────┴───────────────────────────────────────┘
+```
+
+---
+
 ## 💡 The "PocketBase / Supabase" Model: Zero Rust Required for App Developers
 
 > **"Are we pigeonholing ourselves by building in Rust?"**
 > **Only if we force developers to write Rust to use it.**
 
 `skybase` follows the architecture of **PocketBase** (Go engine, JS/Dart users), **Supabase** (Elixir/C engine, JS/Python users), and **Meilisearch** (Rust engine, npm users):
-- **Rust is an invisible superpower for the engine**: Designed to sustain thousands of events/sec over the Jetstream firehose without GC pauses, operate within compact memory budgets, provide zero-crash safety (`#![forbid(unsafe_code)]`), and package into a single zero-dependency binary.
+- **Rust is an invisible superpower for the engine**: Designed to sustain thousands of events/sec over the Jetstream firehose without GC pauses, operate within compact memory budgets (<100MB RAM), provide zero-crash safety (`#![forbid(unsafe_code)]`), and package into a single zero-dependency binary.
 - **The developer interface is 100% language-agnostic**: Frontend and mobile developers interact exclusively via HTTP, WebSockets, and the first-class `@skybase/client` TypeScript / React SDK. You never need to install Rust or Cargo to build apps on `skybase`.
 
 ---
@@ -64,13 +129,13 @@
    npm install @skybase/client
    ```
 
-3. **Build your app**:
+3. **Build your app with Optimistic Reconciliation**:
    ```typescript
    import { Skybase } from '@skybase/client';
 
    const sb = new Skybase('http://localhost:8080');
 
-   // 1. Authenticate with ATProto handle
+   // 1. Authenticate with ATProto handle (Topology A: browser-held keys)
    await sb.auth.signInWithHandle('alice.bsky.social');
 
    // 2. Write sovereign record to user's personal PDS
@@ -78,12 +143,16 @@
      text: 'Hello from Skybase!',
      createdAt: new Date().toISOString()
    });
+   console.log('PDS write committed with CID:', post.cid);
 
-   // 3. Realtime live query (synced from Jetstream firehose into SQLite)
+   // 3. Realtime live query with deterministic state reconciliation
    const unsubscribe = sb.collection('app.bsky.feed.post')
      .where('replyParent', '==', post.uri)
      .orderBy('createdAt', 'desc')
-     .onSnapshot((comments) => console.log('Live comments:', comments));
+     .onSnapshot((comments) => {
+       // Automatic reconciliation: _syncStatus indicates 'optimistic', 'confirmed', or 'lagging'
+       console.log('Live comments:', comments);
+     });
    ```
 
 ### Option B: Backend & Systems Developers (Rust Crate)
@@ -115,6 +184,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+---
+
+## 🗺️ Roadmap & Implementation Phases
+
+- [x] **Phase 1: Project Foundation & Core Architecture**
+  - Crate root scaffolding with `#![forbid(unsafe_code)]` and strict clippy safety gates.
+  - `skyauth` OAuth 2.1 / DPoP / PKCE integration.
+  - Configuration builder and root `SkybaseError` taxonomy.
+  - Comprehensive PRD, handover guide (`AGENTS.md`), and dual-licensing.
+- [ ] **Phase 1.5: The Vertical Slice Wedge (Next Milestone)**
+  - Prove the single end-to-end loop: DPoP login $
+ightarrow$ PDS write $
+ightarrow$ Jetstream ingest $
+ightarrow$ SQLite upsert $
+ightarrow$ live query.
+  - Canonical `records` SQLite schema with JSON1 virtual columns and FTS5 search.
+  - Basic `@skybase/client` TypeScript SDK prototype.
+- [ ] **Phase 2: Micro-AppView Ingestion & Historical Backfill**
+  - Multi-collection filtering and disk-backed cursor persistence.
+  - Historical CAR sync crawler (`com.atproto.sync.getRepo`).
+  - Dynamic index generation from Lexicon schema manifests.
+- [ ] **Phase 3: Realtime Subscriptions & Admin Dashboard**
+  - WebSocket live query push broker.
+  - Embedded web admin UI for collection browsing and query execution.
+  - Local dev sandbox with synthetic Jetstream event replay (`skybase dev --mock`).
+- [ ] **Phase 4: Token-Mediated Proxy & Deployment Automation**
+  - Confidential OAuth session mediator for static sites (Topology C).
+  - 1-click Docker, Fly.io, and Railway deployment templates.
 
 ---
 
