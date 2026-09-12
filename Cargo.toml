@@ -40,6 +40,13 @@ url = { version = "2.5", features = ["serde"] }
 thiserror = "1.0"
 tracing = "0.1"
 
+# Embedded SQLite Engine
+rusqlite = { version = "0.32", features = ["bundled", "bundled-windows", "serde_json"] }
+
+# WebSocket & Stream Ingestion
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+futures-util = { version = "0.3", features = ["sink"] }
+
 # Optional Web Framework & Gateway Server Integrations
 axum = { version = "0.7", optional = true, default-features = false, features = ["json", "query", "tokio"] }
 tower = { version = "0.5", optional = true, default-features = false, features = ["util"] }
@@ -51,3 +58,6 @@ full = ["server"]
 
 [dev-dependencies]
 tokio = { version = "1.40", features = ["full", "test-util"] }
+wiremock = "0.6"
+tempfile = "3"
+

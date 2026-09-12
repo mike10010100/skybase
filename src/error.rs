@@ -42,5 +42,17 @@ pub enum SkybaseError {
     Internal(String),
 }
 
+impl From<rusqlite::Error> for SkybaseError {
+    fn from(err: rusqlite::Error) -> Self {
+        SkybaseError::Storage(err.to_string())
+    }
+}
+
+impl From<skyauth::error::DPoPError> for SkybaseError {
+    fn from(err: skyauth::error::DPoPError) -> Self {
+        SkybaseError::Auth(err.into())
+    }
+}
+
 /// Convenience alias for `Result<T, SkybaseError>`.
 pub type Result<T> = std::result::Result<T, SkybaseError>;
