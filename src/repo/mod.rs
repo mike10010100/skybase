@@ -12,5 +12,5 @@ pub use client::PdsRepoClient;
 pub use tid::{generate_tid, TidGenerator};
 pub use types::{
     format_at_uri, validate_rkey, CreateRecordRequest, CreateRecordResult, DeleteRecordRequest,
-    XrpcErrorResponse,
+    PutRecordRequest, PutRecordResult, RecordView, XrpcErrorResponse,
 };

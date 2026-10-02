@@ -11,7 +11,8 @@ use skyauth::session::OAuthSession;
 
 use crate::error::{Result, SkybaseError};
 use crate::repo::types::{
-    validate_rkey, CreateRecordRequest, CreateRecordResult, DeleteRecordRequest, XrpcErrorResponse,
+    validate_rkey, CreateRecordRequest, CreateRecordResult, DeleteRecordRequest, PutRecordRequest,
+    PutRecordResult, RecordView, XrpcErrorResponse,
 };
 
 /// Maximum bounded body size for error inspection (64 KB).
@@ -283,6 +284,110 @@ impl PdsRepoClient {
             .await?;
 
         Ok(())
+    }
+
+    /// Writes or updates a record in the sovereign PDS repository via `com.atproto.repo.putRecord`.
+    ///
+    /// # Arguments
+    /// - `collection`: The collection NSID (e.g. `"social.skybouncer.config"`).
+    /// - `rkey`: The record key (e.g. `"self"`).
+    /// - `record`: The serializable record payload.
+    /// - `validate`: Whether the PDS should validate the record against its Lexicon schema.
+    ///
+    /// # Returns
+    /// A [`PutRecordResult`] containing the canonical `uri` and `cid`.
+    ///
+    /// # Errors
+    /// Returns [`SkybaseError::Repo`] if validation fails or server rejects the request,
+    /// [`SkybaseError::Network`] on transport errors, or [`SkybaseError::Serialization`] on JSON errors.
+    pub async fn put_record<T: Serialize>(
+        &self,
+        collection: &str,
+        rkey: &str,
+        record: &T,
+        validate: bool,
+    ) -> Result<PutRecordResult> {
+        validate_rkey(rkey)?;
+
+        let did = self.did();
+        let payload = PutRecordRequest {
+            repo: did,
+            collection,
+            rkey,
+            validate,
+            record,
+            swap_record: None,
+            swap_commit: None,
+        };
+
+        let body_bytes = serde_json::to_vec(&payload).map_err(SkybaseError::Serialization)?;
+        let url = self.build_xrpc_url("com.atproto.repo.putRecord")?;
+
+        let resp = self
+            .send_with_nonce_retry(Method::POST, &url, Some(body_bytes))
+            .await?;
+
+        let resp_bytes = read_bounded_bytes(resp, MAX_SUCCESS_BODY_BYTES).await?;
+
+        let res_json: serde_json::Value =
+            serde_json::from_slice(&resp_bytes).map_err(SkybaseError::Serialization)?;
+
+        let uri = res_json
+            .get("uri")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| {
+                SkybaseError::Repo("Missing or empty 'uri' in putRecord response".into())
+            })?
+            .to_string();
+
+        let cid = res_json
+            .get("cid")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| {
+                SkybaseError::Repo("Missing or empty 'cid' in putRecord response".into())
+            })?
+            .to_string();
+
+        Ok(PutRecordResult { uri, cid })
+    }
+
+    /// Fetches a record from a repository via `com.atproto.repo.getRecord`.
+    ///
+    /// # Arguments
+    /// - `repo`: The repository DID or handle.
+    /// - `collection`: The collection NSID.
+    /// - `rkey`: The record key.
+    ///
+    /// # Returns
+    /// A [`RecordView`] containing the canonical `uri`, `cid`, and JSON `value`.
+    ///
+    /// # Errors
+    /// Returns [`SkybaseError::Repo`] if the record is not found or request fails,
+    /// [`SkybaseError::Network`] on transport errors, or [`SkybaseError::Serialization`] on JSON errors.
+    pub async fn get_record(&self, repo: &str, collection: &str, rkey: &str) -> Result<RecordView> {
+        validate_rkey(rkey)?;
+
+        let url_str = self.build_xrpc_url("com.atproto.repo.getRecord")?;
+        let mut parsed_url = Url::parse(&url_str)
+            .map_err(|e| SkybaseError::Repo(format!("Invalid URL '{url_str}': {e}")))?;
+        parsed_url
+            .query_pairs_mut()
+            .append_pair("repo", repo)
+            .append_pair("collection", collection)
+            .append_pair("rkey", rkey);
+
+        let resp = self
+            .send_with_nonce_retry(Method::GET, parsed_url.as_str(), None)
+            .await?;
+
+        let resp_bytes = read_bounded_bytes(resp, MAX_SUCCESS_BODY_BYTES).await?;
+
+        let record_view: RecordView =
+            serde_json::from_slice(&resp_bytes).map_err(SkybaseError::Serialization)?;
+
+        Ok(record_view)
     }
 
     /// Constructs the full target XRPC URL for a given NSID method.

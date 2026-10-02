@@ -36,6 +36,50 @@ pub struct CreateRecordResult {
     pub cid: String,
 }
 
+/// Request payload for `com.atproto.repo.putRecord`.
+///
+/// Writes or updates an existing record at a specified rkey in the repository.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PutRecordRequest<'a, T: Serialize> {
+    /// The DID or handle of the target repository (e.g. `"did:plc:..."`).
+    pub repo: &'a str,
+    /// The NSID of the record collection (e.g. `"social.skybouncer.config"`).
+    pub collection: &'a str,
+    /// The record key (rkey) identifying the record (e.g. `"self"`).
+    pub rkey: &'a str,
+    /// Whether to validate the record against the Lexicon schema.
+    pub validate: bool,
+    /// The record payload object.
+    pub record: &'a T,
+    /// Optional compare-and-swap record CID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub swap_record: Option<&'a str>,
+    /// Optional compare-and-swap commit CID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub swap_commit: Option<&'a str>,
+}
+
+/// The result returned by a successful `com.atproto.repo.putRecord` invocation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PutRecordResult {
+    /// Canonical AT-URI of the created or updated record (`at://{did}/{collection}/{rkey}`).
+    pub uri: String,
+    /// Content identifier (CID) of the committed record.
+    pub cid: String,
+}
+
+/// The record returned by a successful `com.atproto.repo.getRecord` invocation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordView {
+    /// Canonical AT-URI of the record.
+    pub uri: String,
+    /// Content identifier (CID) of the record.
+    pub cid: String,
+    /// The record data payload as a JSON value.
+    pub value: serde_json::Value,
+}
+
 /// Request payload for `com.atproto.repo.deleteRecord`.
 ///
 /// Removes an existing record from the specified repository and collection.
