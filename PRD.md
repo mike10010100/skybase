@@ -97,7 +97,7 @@ To accommodate everything from weekend hobbyists on GitHub Pages to production s
 ```
 
 ### 2.3 Strict Engineering Blueprint
-`skybase` adheres strictly to the **Production-Grade Rust Best Practices & Architecture Standards** defined in the user's reference repository ([`rust-best-practices`](/Users/mike10010100/git/rust-best-practices)):
+`skybase` adheres strictly to the **Production-Grade Rust Best Practices & Architecture Standards** defined in the reference repository ([`rust-best-practices`](https://github.com/mike10010100/rust-best-practices)):
 - `#![forbid(unsafe_code)]` crate-wide.
 - Strict crate-root lints (`missing_docs`, zero unwrap/expect/panic in production).
 - Typed errors (`SkybaseError` via `thiserror`).
