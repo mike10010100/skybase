@@ -27,11 +27,15 @@
     rust_2018_idioms
 )]
 
+pub mod appview;
 pub mod error;
 pub mod index;
 pub mod ingest;
 pub mod repo;
-
+pub use appview::{
+    ActorProfile, AppViewClient, PostView, DEFAULT_APPVIEW_ENDPOINT, DEFAULT_APPVIEW_TIMEOUT_MS,
+    DEFAULT_CDN_ENDPOINT,
+};
 pub use error::{Result, SkybaseError};
 pub use index::{
     parse_at_uri, BatchStats, BroadcastBus, ChangeNotification, QueryBuilder, QueryOp, RecordInput,
