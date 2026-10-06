@@ -28,13 +28,19 @@
 )]
 
 pub mod appview;
+pub mod chat;
 pub mod error;
 pub mod index;
 pub mod ingest;
+pub mod lexicon;
 pub mod repo;
 pub use appview::{
     ActorProfile, AppViewClient, PostView, DEFAULT_APPVIEW_ENDPOINT, DEFAULT_APPVIEW_TIMEOUT_MS,
     DEFAULT_CDN_ENDPOINT,
+};
+pub use chat::{
+    ChatClient, ConvoMember, ConvoView, MessageSender, MessageView, SendMessagePayload,
+    DEFAULT_CHAT_ENDPOINT,
 };
 pub use error::{Result, SkybaseError};
 pub use index::{
@@ -49,6 +55,7 @@ pub use ingest::{
     JetstreamConsumer, JetstreamConsumerHandle, JetstreamEvent, MockJetstreamServer,
     MockServerCommand, RawJetstreamCommit, RawJetstreamMessage,
 };
+pub use lexicon::{extract_link_facets, ByteSlice, Facet, FacetFeature, FacetIndex};
 pub use repo::{
     format_at_uri, generate_tid, validate_rkey, CreateRecordRequest, CreateRecordResult,
     DeleteRecordRequest, PdsRepoClient, TidGenerator, XrpcErrorResponse,

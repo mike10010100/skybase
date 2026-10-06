@@ -1692,6 +1692,7 @@ dependencies = [
  "axum",
  "futures-util",
  "parking_lot",
+ "regex",
  "reqwest",
  "rusqlite",
  "serde",
