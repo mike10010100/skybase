@@ -55,7 +55,12 @@ pub use ingest::{
     JetstreamConsumer, JetstreamConsumerHandle, JetstreamEvent, MockJetstreamServer,
     MockServerCommand, RawJetstreamCommit, RawJetstreamMessage,
 };
-pub use lexicon::{extract_link_facets, ByteSlice, Facet, FacetFeature, FacetIndex};
+pub use lexicon::{
+    extract_link_facets, format_system_time_iso8601, now_iso8601, ByteSlice, Embed, Facet,
+    FacetFeature, FacetIndex, FollowRecord, ListBlockRecord, ListItemRecord, ListRecordsResponse,
+    ModListRecord, PostRecord, RecordEmbed, RecordWithMediaEmbed, ReplyRef, RepoRecordItem,
+    StrongRef,
+};
 pub use repo::{
     format_at_uri, generate_tid, validate_rkey, CreateRecordRequest, CreateRecordResult,
     DeleteRecordRequest, PdsRepoClient, TidGenerator, XrpcErrorResponse,

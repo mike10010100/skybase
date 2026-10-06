@@ -3,8 +3,17 @@
 //! Provides Serde representations of `app.bsky.richtext.facet` and its associated
 //! `byteSlice`, `#mention`, `#link`, and `#tag` feature types, plus a
 //! UTF-8-byte-accurate [`extract_link_facets`] helper for annotating link facets.
+//! See [`records`] for the broader feed/graph record models.
+
+pub mod records;
 
 use serde::{Deserialize, Serialize};
+
+pub use records::{
+    format_system_time_iso8601, now_iso8601, Embed, FollowRecord, ListBlockRecord, ListItemRecord,
+    ListRecordsResponse, ModListRecord, PostRecord, RecordEmbed, RecordWithMediaEmbed, ReplyRef,
+    RepoRecordItem, StrongRef,
+};
 
 /// UTF-8 byte slice range for rich text facets (`app.bsky.richtext.facet#byteSlice`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
