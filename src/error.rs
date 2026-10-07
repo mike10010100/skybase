@@ -25,6 +25,10 @@ pub enum SkybaseError {
     #[error("Event stream error: {0}")]
     Event(String),
 
+    /// Failure communicating with the ATProto Chat (`chat.bsky.convo.*`) service.
+    #[error("Chat/DM service error: {0}")]
+    Chat(String),
+
     /// Invalid configuration supplied to Skybase engine or client.
     #[error("Configuration error: {0}")]
     Config(String),

@@ -27,11 +27,21 @@
     rust_2018_idioms
 )]
 
+pub mod appview;
+pub mod chat;
 pub mod error;
 pub mod index;
 pub mod ingest;
+pub mod lexicon;
 pub mod repo;
-
+pub use appview::{
+    ActorProfile, AppViewClient, PostView, DEFAULT_APPVIEW_ENDPOINT, DEFAULT_APPVIEW_TIMEOUT_MS,
+    DEFAULT_CDN_ENDPOINT,
+};
+pub use chat::{
+    ChatClient, ConvoMember, ConvoView, MessageSender, MessageView, SendMessagePayload,
+    DEFAULT_CHAT_ENDPOINT,
+};
 pub use error::{Result, SkybaseError};
 pub use index::{
     parse_at_uri, BatchStats, BroadcastBus, ChangeNotification, QueryBuilder, QueryOp, RecordInput,
@@ -44,6 +54,12 @@ pub use ingest::{
     BackoffManager, CommitOperation, ConsumerStats, CursorTracker, IngesterConfig, JetstreamCommit,
     JetstreamConsumer, JetstreamConsumerHandle, JetstreamEvent, MockJetstreamServer,
     MockServerCommand, RawJetstreamCommit, RawJetstreamMessage,
+};
+pub use lexicon::{
+    extract_link_facets, format_system_time_iso8601, now_iso8601, ByteSlice, Embed, Facet,
+    FacetFeature, FacetIndex, FollowRecord, ListBlockRecord, ListItemRecord, ListRecordsResponse,
+    ModListRecord, PostRecord, RecordEmbed, RecordWithMediaEmbed, ReplyRef, RepoRecordItem,
+    StrongRef,
 };
 pub use repo::{
     format_at_uri, generate_tid, validate_rkey, CreateRecordRequest, CreateRecordResult,
