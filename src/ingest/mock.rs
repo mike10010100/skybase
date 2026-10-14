@@ -114,7 +114,7 @@ impl MockJetstreamServer {
                                     cmd = client_rx.recv() => {
                                         match cmd {
                                             Ok(MockServerCommand::Text(text)) => {
-                                                if ws_stream.send(Message::Text(text)).await.is_err() {
+                                                if ws_stream.send(Message::Text(text.into())).await.is_err() {
                                                     break;
                                                 }
                                             }

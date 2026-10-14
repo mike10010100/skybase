@@ -585,7 +585,7 @@ async fn run_reader_reconnect_loop(
                         futures_util::future::pending().await
                     }
                 } => {
-                    if ws_stream.send(Message::Ping(Vec::new())).await.is_err() {
+                    if ws_stream.send(Message::Ping(Vec::new().into())).await.is_err() {
                         stats.reconnect_count.fetch_add(1, Ordering::Relaxed);
                         tracing::warn!("Failed to send keepalive ping; reconnecting.");
                         break;
