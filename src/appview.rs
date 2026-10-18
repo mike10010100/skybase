@@ -27,10 +27,16 @@ pub const DEFAULT_MAX_PAGES: usize = 100;
 /// Profile metadata returned by `app.bsky.actor.getProfile`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct ActorProfile {
+    /// Subject Decentralized Identifier (`did:plc:...` or `did:web:...`), if returned.
+    #[serde(default)]
+    pub did: Option<String>,
     /// Author handle (e.g. `"alice.bsky.social"`).
     pub handle: Option<String>,
     /// User-defined display name.
     pub display_name: Option<String>,
+    /// Profile avatar image URL.
+    #[serde(default)]
+    pub avatar: Option<String>,
     /// Profile description / bio text.
     pub description: Option<String>,
     /// Count of accounts following this author.
@@ -39,6 +45,21 @@ pub struct ActorProfile {
     pub follows_count: Option<u64>,
     /// Account registration timestamp in ISO 8601 format.
     pub created_at: Option<String>,
+}
+
+/// Actor suggestion returned by `app.bsky.actor.searchActorsTypeahead`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub struct ActorSuggestion {
+    /// Decentralized Identifier of the actor (`did:plc:...` or `did:web:...`).
+    pub did: String,
+    /// Handle of the actor (e.g. `"alice.bsky.social"`).
+    pub handle: String,
+    /// Optional user-defined display name.
+    #[serde(default, rename = "displayName")]
+    pub display_name: Option<String>,
+    /// Optional profile avatar URL.
+    #[serde(default)]
+    pub avatar: Option<String>,
 }
 
 /// A resolved post view returned by `app.bsky.feed.getPosts`.
@@ -189,12 +210,17 @@ impl AppViewClient {
 
     /// Resolves an ATProto handle to a DID via `com.atproto.identity.resolveHandle`.
     ///
+    /// Single-label handles without a domain (e.g. `"alice"` or `"@alice"`) automatically
+    /// default to `.bsky.social` via [`skyauth::identity::normalize_user_handle`].
     /// Returns `None` on any failure. A DID input is returned unchanged.
     pub async fn resolve_handle(&self, handle: &str) -> Option<String> {
         let clean = handle.trim().trim_start_matches('@');
         if clean.starts_with("did:") {
             return Some(clean.to_string());
         }
+
+        let normalized =
+            skyauth::identity::normalize_user_handle(clean).unwrap_or_else(|_| clean.to_string());
 
         #[derive(Deserialize)]
         struct ResolveHandleResponse {
@@ -203,11 +229,36 @@ impl AppViewClient {
 
         self.get::<ResolveHandleResponse>(
             "com.atproto.identity.resolveHandle",
-            &[("handle", clean.to_string())],
+            &[("handle", normalized)],
         )
         .await
         .ok()
         .map(|r| r.did)
+    }
+
+    /// Searches actor profiles by handle/name prefix via `app.bsky.actor.searchActorsTypeahead`.
+    ///
+    /// Returns an empty vector if `query` is empty or on any transport/decode failure.
+    pub async fn search_actors_typeahead(&self, query: &str, limit: u8) -> Vec<ActorSuggestion> {
+        let clean = query.trim().trim_start_matches('@').trim();
+        if clean.is_empty() {
+            return Vec::new();
+        }
+        let clamped_limit = limit.clamp(1, 25).to_string();
+
+        #[derive(Deserialize)]
+        struct TypeaheadResponse {
+            #[serde(default)]
+            actors: Vec<ActorSuggestion>,
+        }
+
+        self.get::<TypeaheadResponse>(
+            "app.bsky.actor.searchActorsTypeahead",
+            &[("q", clean.to_string()), ("limit", clamped_limit)],
+        )
+        .await
+        .map(|r| r.actors)
+        .unwrap_or_default()
     }
 
     /// Fetches an actor profile via `app.bsky.actor.getProfile`.
@@ -216,9 +267,11 @@ impl AppViewClient {
     pub async fn fetch_profile(&self, did: &str) -> Option<ActorProfile> {
         #[derive(Deserialize)]
         struct RawProfile {
+            did: Option<String>,
             handle: Option<String>,
             #[serde(rename = "displayName")]
             display_name: Option<String>,
+            avatar: Option<String>,
             description: Option<String>,
             #[serde(rename = "followersCount")]
             followers_count: Option<u64>,
@@ -233,8 +286,10 @@ impl AppViewClient {
             .await
             .ok()?;
         Some(ActorProfile {
+            did: raw.did,
             handle: raw.handle,
             display_name: raw.display_name,
+            avatar: raw.avatar,
             description: raw.description,
             followers_count: raw.followers_count,
             follows_count: raw.follows_count,

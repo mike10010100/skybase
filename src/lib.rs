@@ -35,8 +35,8 @@ pub mod ingest;
 pub mod lexicon;
 pub mod repo;
 pub use appview::{
-    ActorProfile, AppViewClient, PostView, DEFAULT_APPVIEW_ENDPOINT, DEFAULT_APPVIEW_TIMEOUT_MS,
-    DEFAULT_CDN_ENDPOINT,
+    ActorProfile, ActorSuggestion, AppViewClient, PostView, DEFAULT_APPVIEW_ENDPOINT,
+    DEFAULT_APPVIEW_TIMEOUT_MS, DEFAULT_CDN_ENDPOINT,
 };
 pub use chat::{
     ChatClient, ConvoMember, ConvoView, MessageSender, MessageView, SendMessagePayload,
@@ -171,6 +171,15 @@ impl SkybaseConfig {
     }
 }
 
+/// Combined OAuth provider discovery and public profile preview for a user handle or DID.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LoginIdentityPreview {
+    /// Resolved OAuth identity and provider endpoints (`did`, `handle`, `pds_host`, `auth_server_host`, etc.).
+    pub oauth: skyauth::client::OAuthLoginPreview,
+    /// Optional public profile metadata fetched from the AppView (`display_name`, `avatar`, etc.).
+    pub profile: Option<ActorProfile>,
+}
+
 /// The unified Skybase backend engine and client facade.
 #[derive(Clone)]
 pub struct Skybase {
@@ -268,6 +277,26 @@ impl Skybase {
     #[must_use]
     pub fn auth(&self) -> &skyauth::client::AtprotoOAuthClient {
         &self.auth_client
+    }
+
+    /// Resolves a user handle or DID into a [`LoginIdentityPreview`] combining OAuth provider
+    /// discovery (`did`, `handle`, `pds_host`, `auth_server_host`) with public AppView profile
+    /// enrichment (`display_name`, `avatar`).
+    ///
+    /// # Errors
+    /// Returns [`SkybaseError::Auth`] if OAuth identity or endpoint discovery fails.
+    pub async fn preview_login(
+        &self,
+        appview: &AppViewClient,
+        handle_or_did: &str,
+    ) -> Result<LoginIdentityPreview> {
+        let oauth = self
+            .auth_client
+            .preview_login(handle_or_did)
+            .await
+            .map_err(SkybaseError::Auth)?;
+        let profile = appview.fetch_profile(&oauth.did).await;
+        Ok(LoginIdentityPreview { oauth, profile })
     }
 
     /// Returns a reference to the active [`RecordStore`], if initialized.
