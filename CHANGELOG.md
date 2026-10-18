@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] - 2026-10-18
+
+### Added
+
+- **Actor Typeahead & Profile Avatar Support** (`src/appview.rs`): Added `ActorSuggestion` and `AppViewClient::search_actors_typeahead` (`app.bsky.actor.searchActorsTypeahead`), enriched `ActorProfile` with `did` and `avatar`, and updated `AppViewClient::resolve_handle` to automatically assume `.bsky.social` for bare single-label handles.
+- **Pre-Flight Login Identity Preview** (`src/lib.rs`): Added `LoginIdentityPreview` and `Skybase::preview_login` combining `skyauth`'s OAuth provider discovery (`OAuthLoginPreview`) with AppView profile enrichment.
+
 ## [0.1.3] - 2026-10-14
 
 ### Changed

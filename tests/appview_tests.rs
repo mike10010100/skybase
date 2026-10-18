@@ -177,3 +177,59 @@ async fn test_thumbnail_url_construction() {
         "https://cdn.example/img/feed_thumbnail/plain/did:plc:alice/bafycid@jpeg"
     );
 }
+
+#[tokio::test]
+async fn test_resolve_bare_handle_completes_bsky_social() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/xrpc/com.atproto.identity.resolveHandle"))
+        .and(query_param("handle", "alice.bsky.social"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"did": "did:plc:alice"})))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    assert_eq!(
+        client.resolve_handle("alice").await,
+        Some("did:plc:alice".to_string())
+    );
+    assert_eq!(
+        client.resolve_handle("@alice").await,
+        Some("did:plc:alice".to_string())
+    );
+}
+
+#[tokio::test]
+async fn test_search_actors_typeahead_returns_suggestions() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/xrpc/app.bsky.actor.searchActorsTypeahead"))
+        .and(query_param("q", "ali"))
+        .and(query_param("limit", "5"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "actors": [
+                {
+                    "did": "did:plc:alice",
+                    "handle": "alice.bsky.social",
+                    "displayName": "Alice Wonderland",
+                    "avatar": "https://ava.example/alice.jpg"
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let results = client.search_actors_typeahead("@ali", 5).await;
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].did, "did:plc:alice");
+    assert_eq!(results[0].handle, "alice.bsky.social");
+    assert_eq!(results[0].display_name.as_deref(), Some("Alice Wonderland"));
+    assert_eq!(
+        results[0].avatar.as_deref(),
+        Some("https://ava.example/alice.jpg")
+    );
+
+    // Empty query performs no network call and returns empty vector.
+    assert!(client.search_actors_typeahead("   ", 5).await.is_empty());
+}
