@@ -1,6 +1,6 @@
 [package]
 name = "skybase"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 rust-version = "1.89"
 authors = ["Michael Paulauski <mike10010100@gmail.com>"]
@@ -19,7 +19,7 @@ path = "src/lib.rs"
 
 [dependencies]
 # Identity & OAuth 2.1 Engine
-skyauth = { path = "../skyauth", version = "0.3.6" }
+skyauth = { path = "../skyauth", version = "0.3.7" }
 
 # Concurrency & Async Runtime
 tokio = { version = "1.40", default-features = false, features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
@@ -32,6 +32,8 @@ serde_json = "1.0"
 
 # Networking & HTTP
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+rustls-webpki = { version = "0.103.16", default-features = false, features = ["std", "ring"] }
+webpki-roots = "1.0.10"
 url = { version = "2.5", features = ["serde"] }
 
 # Pattern Matching (rich text link facet extraction)
@@ -61,4 +63,6 @@ full = ["server"]
 tokio = { version = "1.40", features = ["full", "test-util"] }
 wiremock = "0.6"
 tempfile = "3"
+base64 = "0.23"
+rustls-pki-types = "1.12"
 

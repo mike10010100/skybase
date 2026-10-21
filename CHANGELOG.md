@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] - 2026-10-21
+
+### Security
+
+- **eMudhra Intermediate CA Compromise Mitigation** (`Cargo.toml`, `Cargo.lock`, `deny.toml`, `tests/emudhra_tls_distrust_tests.rs`): Bumped `skyauth` to `0.3.7`, enforced `rustls-webpki >= 0.103.16` and `webpki-roots >= 1.0.10` in `[dependencies]`, and banned vulnerable versions (`rustls-webpki@<0.103.16`, `webpki-roots@<1.0.10`) in `deny.toml` so all outbound HTTPS/WSS connections (AppView, PDS XRPC, and Jetstream firehose ingestion) distrust the compromised eMudhra intermediate CAs across both `emSign` and Sectigo `AAA Certificate Services` cross-signed chains.
+
 ## [0.1.4] - 2026-10-18
 
 ### Added
