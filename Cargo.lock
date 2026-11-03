@@ -949,6 +949,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "k256"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93f50113171a713f4a4231ef82eb26703607139b35dcb56241f0ceab2ae1f7d8"
+dependencies = [
+ "cpubits",
+ "ecdsa",
+ "elliptic-curve",
+ "primeorder",
+ "sha2",
+ "wnaf",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1681,13 +1695,14 @@ dependencies = [
 
 [[package]]
 name = "skyauth"
-version = "0.3.8"
+version = "0.3.10"
 dependencies = [
  "aes-gcm",
  "ahash",
  "base64 0.23.1",
  "hmac",
  "http",
+ "k256",
  "p256",
  "parking_lot",
  "rand",
@@ -1709,7 +1724,7 @@ dependencies = [
 
 [[package]]
 name = "skybase"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -1840,7 +1855,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

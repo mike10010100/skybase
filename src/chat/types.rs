@@ -44,6 +44,93 @@ pub struct MessageView {
     pub sent_at: String,
 }
 
+/// Deleted message tombstone representation in `chat.bsky.convo.defs#deletedMessageView`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeletedMessageView {
+    /// Unique message identifier string.
+    pub id: String,
+    /// Revision identifier.
+    #[serde(default)]
+    pub rev: String,
+    /// Sender metadata.
+    pub sender: MessageSender,
+    /// ISO 8601 timestamp string when the message was originally sent.
+    #[serde(rename = "sentAt")]
+    pub sent_at: String,
+}
+
+/// Union item returned in `chat.bsky.convo.defs#convoView.lastMessage` or `getMessages`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "$type")]
+pub enum ChatMessageView {
+    /// Active text message (`chat.bsky.convo.defs#messageView`).
+    #[serde(rename = "chat.bsky.convo.defs#messageView")]
+    Message(MessageView),
+    /// Deleted message tombstone (`chat.bsky.convo.defs#deletedMessageView`).
+    #[serde(rename = "chat.bsky.convo.defs#deletedMessageView")]
+    Deleted(DeletedMessageView),
+    /// Unrecognized or future message union variant.
+    #[serde(other)]
+    Unknown,
+}
+
+fn deserialize_optional_message_view<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<MessageView>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    let Some(val) = raw else {
+        return Ok(None);
+    };
+    if val
+        .get("$type")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|t| t.ends_with("#deletedMessageView"))
+    {
+        return Ok(None);
+    }
+    if val
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .is_none()
+    {
+        return Ok(None);
+    }
+    Ok(serde_json::from_value::<MessageView>(val).ok())
+}
+
+fn deserialize_message_views_filtering_deleted<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<MessageView>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw_items: Vec<serde_json::Value> = Vec::deserialize(deserializer)?;
+    let mut out = Vec::with_capacity(raw_items.len());
+    for val in raw_items {
+        if val
+            .get("$type")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|t| t.ends_with("#deletedMessageView"))
+        {
+            continue;
+        }
+        if val
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .is_none()
+        {
+            continue;
+        }
+        if let Ok(msg) = serde_json::from_value::<MessageView>(val) {
+            out.push(msg);
+        }
+    }
+    Ok(out)
+}
+
 /// Conversation representation in `chat.bsky.convo.defs#convoView`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConvoView {
@@ -55,8 +142,12 @@ pub struct ConvoView {
     /// Members participating in the conversation.
     #[serde(default)]
     pub members: Vec<ConvoMember>,
-    /// Most recent message in the conversation, if any.
-    #[serde(rename = "lastMessage", default)]
+    /// Most recent active message in the conversation, if any (leniently yields `None` when the last message is a `#deletedMessageView`).
+    #[serde(
+        rename = "lastMessage",
+        default,
+        deserialize_with = "deserialize_optional_message_view"
+    )]
     pub last_message: Option<MessageView>,
     /// Number of unread messages for the authenticated caller.
     #[serde(rename = "unreadCount", default)]
@@ -107,8 +198,11 @@ pub struct AcceptConvoResponse {
 /// Response payload from `chat.bsky.convo.getMessages`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GetMessagesResponse {
-    /// Messages returned in the current page.
-    #[serde(default)]
+    /// Active messages returned in the current page (`#deletedMessageView` tombstones are automatically filtered out).
+    #[serde(
+        default,
+        deserialize_with = "deserialize_message_views_filtering_deleted"
+    )]
     pub messages: Vec<MessageView>,
     /// Pagination cursor string if more messages exist.
     #[serde(default)]
@@ -226,5 +320,73 @@ mod tests {
             FacetFeature::Link { uri } => assert_eq!(uri, "https://test.org"),
             _ => panic!("expected Link"),
         }
+    }
+
+    #[test]
+    fn test_convo_view_and_get_messages_survive_deleted_message_view() {
+        let convos_json = r#"{
+            "convos": [
+                {
+                    "id": "convo-deleted-last",
+                    "rev": "rev1",
+                    "members": [{"did": "did:plc:alice"}],
+                    "lastMessage": {
+                        "$type": "chat.bsky.convo.defs#deletedMessageView",
+                        "id": "msg-del-1",
+                        "rev": "rev1",
+                        "sender": {"did": "did:plc:alice"},
+                        "sentAt": "2026-11-03T00:00:00Z"
+                    },
+                    "unreadCount": 0,
+                    "status": "accepted"
+                },
+                {
+                    "id": "convo-live-last",
+                    "rev": "rev2",
+                    "members": [{"did": "did:plc:bob"}],
+                    "lastMessage": {
+                        "$type": "chat.bsky.convo.defs#messageView",
+                        "id": "msg-live-2",
+                        "rev": "rev2",
+                        "text": "!status",
+                        "sender": {"did": "did:plc:bob"},
+                        "sentAt": "2026-11-03T00:01:00Z"
+                    },
+                    "unreadCount": 1,
+                    "status": "request"
+                }
+            ]
+        }"#;
+        let parsed: ListConvosResponse = serde_json::from_str(convos_json).unwrap();
+        assert_eq!(parsed.convos.len(), 2);
+        assert!(parsed.convos[0].last_message.is_none());
+        assert_eq!(
+            parsed.convos[1].last_message.as_ref().unwrap().text,
+            "!status"
+        );
+
+        let messages_json = r#"{
+            "messages": [
+                {
+                    "$type": "chat.bsky.convo.defs#deletedMessageView",
+                    "id": "msg-del-1",
+                    "rev": "rev1",
+                    "sender": {"did": "did:plc:alice"},
+                    "sentAt": "2026-11-03T00:00:00Z"
+                },
+                {
+                    "$type": "chat.bsky.convo.defs#messageView",
+                    "id": "msg-live-2",
+                    "rev": "rev2",
+                    "text": "hello bot",
+                    "sender": {"did": "did:plc:bob"},
+                    "sentAt": "2026-11-03T00:01:00Z"
+                }
+            ]
+        }"#;
+        let msg_resp: GetMessagesResponse = serde_json::from_str(messages_json).unwrap();
+        assert_eq!(msg_resp.messages.len(), 1);
+        assert_eq!(msg_resp.messages[0].id, "msg-live-2");
+        assert_eq!(msg_resp.messages[0].text, "hello bot");
     }
 }

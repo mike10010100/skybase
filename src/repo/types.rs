@@ -128,6 +128,52 @@ pub fn format_at_uri(did: &str, collection: &str, rkey: &str) -> String {
     format!("at://{did}/{collection}/{rkey}")
 }
 
+/// Splits an `at://{authority}/{collection}/{rkey}` URI into `(authority, collection, rkey)`.
+#[must_use]
+pub fn split_at_uri(uri: &str) -> Option<(&str, &str, &str)> {
+    let stripped = uri.strip_prefix("at://")?;
+    let mut parts = stripped.split('/');
+    let authority = parts.next()?;
+    let collection = parts.next()?;
+    let rkey = parts.next()?;
+    Some((authority, collection, rkey))
+}
+
+/// Extracts the DID portion from an AT-URI (`at://{did}/{collection}/{rkey}`).
+///
+/// Returns `None` if the URI does not start with `at://` or lacks a valid `did:` authority.
+#[must_use]
+pub fn extract_did_from_at_uri(uri: &str) -> Option<&str> {
+    let stripped = uri.strip_prefix("at://")?;
+    let did = stripped.split('/').next()?;
+    if did.starts_with("did:") {
+        Some(did)
+    } else {
+        None
+    }
+}
+
+/// Extracts the authority DID from an AT-URI if and only if the collection matches `expected_collection`
+/// and the record key (`rkey`) is non-empty.
+#[must_use]
+pub fn extract_did_for_collection<'a>(uri: &'a str, expected_collection: &str) -> Option<&'a str> {
+    let (did, collection, rkey) = split_at_uri(uri)?;
+    if !did.starts_with("did:") || collection != expected_collection || rkey.is_empty() {
+        return None;
+    }
+    Some(did)
+}
+
+/// Parses an AT-URI (`at://{author}/{collection}/{rkey}`) into `(author, rkey)`.
+#[must_use]
+pub fn parse_at_post_uri(uri: &str) -> Option<(&str, &str)> {
+    let (author, _collection, rkey) = split_at_uri(uri)?;
+    if author.is_empty() || rkey.is_empty() {
+        return None;
+    }
+    Some((author, rkey))
+}
+
 /// Validates that a record key (rkey) complies with the AT Protocol record key specification.
 ///
 /// Keys must consist of 1–512 ASCII alphanumeric or `.` `_` `~` `-` characters,
@@ -177,6 +223,20 @@ mod tests {
     fn test_format_at_uri() {
         let uri = format_at_uri("did:plc:12345", "app.bsky.feed.post", "rkey_abc");
         assert_eq!(uri, "at://did:plc:12345/app.bsky.feed.post/rkey_abc");
+        assert_eq!(
+            split_at_uri(&uri),
+            Some(("did:plc:12345", "app.bsky.feed.post", "rkey_abc"))
+        );
+        assert_eq!(extract_did_from_at_uri(&uri), Some("did:plc:12345"));
+        assert_eq!(
+            extract_did_for_collection(&uri, "app.bsky.feed.post"),
+            Some("did:plc:12345")
+        );
+        assert_eq!(
+            extract_did_for_collection(&uri, "app.bsky.graph.list"),
+            None
+        );
+        assert_eq!(parse_at_post_uri(&uri), Some(("did:plc:12345", "rkey_abc")));
     }
 
     #[test]

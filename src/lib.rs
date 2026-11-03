@@ -30,6 +30,7 @@
 pub mod appview;
 pub mod chat;
 pub mod error;
+#[cfg(feature = "storage")]
 pub mod index;
 pub mod ingest;
 pub mod lexicon;
@@ -39,10 +40,11 @@ pub use appview::{
     DEFAULT_APPVIEW_TIMEOUT_MS, DEFAULT_CDN_ENDPOINT,
 };
 pub use chat::{
-    ChatClient, ConvoMember, ConvoView, MessageSender, MessageView, SendMessagePayload,
-    DEFAULT_CHAT_ENDPOINT,
+    ChatClient, ChatMessageView, ConvoMember, ConvoView, DeletedMessageView, MessageSender,
+    MessageView, SendMessagePayload, DEFAULT_CHAT_ENDPOINT,
 };
 pub use error::{Result, SkybaseError};
+#[cfg(feature = "storage")]
 pub use index::{
     parse_at_uri, BatchStats, BroadcastBus, ChangeNotification, QueryBuilder, QueryOp, RecordInput,
     RecordRow, RecordStore, RecordStoreConfig, SortDirection, StoreOperation,
@@ -50,25 +52,37 @@ pub use index::{
 };
 pub use ingest::{
     build_subscription_url, build_subscription_url_full, normalize_indexed_at,
-    parse_frame_timestamp, parse_jetstream_commit, parse_jetstream_frame, sync_commit_to_store,
-    BackoffManager, CommitOperation, ConsumerStats, CursorTracker, IngesterConfig, JetstreamCommit,
-    JetstreamConsumer, JetstreamConsumerHandle, JetstreamEvent, MockJetstreamServer,
-    MockServerCommand, RawJetstreamCommit, RawJetstreamMessage,
+    parse_frame_timestamp, parse_jetstream_commit, parse_jetstream_frame, resolve_resume_cursor,
+    run_jetstream_streamer, BackoffManager, CommitOperation, CursorTracker, JetstreamCommit,
+    JetstreamEvent, MockJetstreamServer, MockServerCommand, RawJetstreamCommit,
+    RawJetstreamMessage, StreamConfig, CURSOR_REWIND_OVERLAP_US, DEFAULT_JETSTREAM_ENDPOINT,
+    DEFAULT_PING_INTERVAL, DEFAULT_READ_TIMEOUT, INITIAL_BACKOFF, MAX_BACKOFF,
+    MAX_JETSTREAM_REPLAY_WINDOW_US,
+};
+#[cfg(feature = "storage")]
+pub use ingest::{
+    sync_commit_to_store, ConsumerStats, IngesterConfig, JetstreamConsumer, JetstreamConsumerHandle,
 };
 pub use lexicon::{
-    extract_link_facets, format_system_time_iso8601, now_iso8601, ByteSlice, Embed, Facet,
-    FacetFeature, FacetIndex, FollowRecord, ListBlockRecord, ListItemRecord, ListRecordsResponse,
-    ModListRecord, PostRecord, RecordEmbed, RecordWithMediaEmbed, ReplyRef, RepoRecordItem,
-    StrongRef,
+    extract_link_facets, format_system_time_iso8601, format_unix_secs_iso8601, has_nsfw_self_label,
+    now_iso8601, ByteSlice, Embed, Facet, FacetFeature, FacetIndex, FollowRecord, ListBlockRecord,
+    ListItemRecord, ListRecordsResponse, ModListRecord, PostRecord, RecordEmbed,
+    RecordWithMediaEmbed, ReplyRef, RepoRecordItem, SelfLabel, SelfLabels, StrongRef,
+    NSFW_SELF_LABEL_VALUES,
 };
 pub use repo::{
-    format_at_uri, generate_tid, validate_rkey, CreateRecordRequest, CreateRecordResult,
-    DeleteRecordRequest, PdsRepoClient, TidGenerator, XrpcErrorResponse,
+    decode_tid_timestamp_secs, decode_tid_timestamp_us, extract_did_for_collection,
+    extract_did_from_at_uri, format_at_uri, generate_tid, parse_at_post_uri, split_at_uri,
+    validate_rkey, CreateRecordRequest, CreateRecordResult, DeleteRecordRequest, PdsRepoClient,
+    PutRecordRequest, PutRecordResult, RecordView, TidGenerator, XrpcErrorResponse,
+    MAX_PLAUSIBLE_TID_EPOCH_SECS, MIN_PLAUSIBLE_TID_EPOCH_SECS,
 };
 pub use skyauth;
 pub use tokio_util::sync::CancellationToken;
 
-use std::path::{Path, PathBuf};
+#[cfg(feature = "storage")]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Configuration options for initializing a [`Skybase`] engine instance.
@@ -87,6 +101,7 @@ pub struct SkybaseConfig {
     /// Whether to open an isolated in-memory SQLite database upon initialization.
     pub in_memory_store: bool,
     /// Optional explicit configuration for the embedded record store.
+    #[cfg(feature = "storage")]
     pub store_config: Option<RecordStoreConfig>,
     /// Target collection NSIDs to filter for at the edge during Jetstream ingestion.
     pub wanted_collections: Vec<String>,
@@ -108,6 +123,7 @@ impl SkybaseConfig {
             jetstream_endpoint: None,
             storage_path: None,
             in_memory_store: false,
+            #[cfg(feature = "storage")]
             store_config: None,
             wanted_collections: Vec::new(),
             wanted_dids: Vec::new(),
@@ -133,6 +149,7 @@ impl SkybaseConfig {
     }
 
     /// Sets an explicit [`RecordStoreConfig`].
+    #[cfg(feature = "storage")]
     pub fn with_store_config(mut self, config: RecordStoreConfig) -> Self {
         self.store_config = Some(config);
         self
@@ -185,6 +202,7 @@ pub struct LoginIdentityPreview {
 pub struct Skybase {
     config: Arc<SkybaseConfig>,
     auth_client: Arc<skyauth::client::AtprotoOAuthClient>,
+    #[cfg(feature = "storage")]
     store: Option<RecordStore>,
 }
 
@@ -214,6 +232,7 @@ impl Skybase {
             .build()
             .map_err(SkybaseError::Auth)?;
 
+        #[cfg(feature = "storage")]
         let store = if let Some(ref store_cfg) = config.store_config {
             Some(RecordStore::with_config(store_cfg.clone())?)
         } else if let Some(ref path) = config.storage_path {
@@ -227,6 +246,7 @@ impl Skybase {
         Ok(Self {
             config: Arc::new(config),
             auth_client: Arc::new(auth_client),
+            #[cfg(feature = "storage")]
             store,
         })
     }
@@ -236,11 +256,13 @@ impl Skybase {
     /// # Errors
     /// Returns [`SkybaseError::Config`] or [`SkybaseError::Auth`] if client metadata is invalid,
     /// or [`SkybaseError::Storage`] if in-memory database initialization fails.
+    #[cfg(feature = "storage")]
     pub fn in_memory(config: SkybaseConfig) -> Result<Self> {
         Self::new(config.with_in_memory_store())
     }
 
     /// Attaches an existing [`RecordStore`] to this [`Skybase`] instance.
+    #[cfg(feature = "storage")]
     #[must_use]
     pub fn with_store(mut self, store: RecordStore) -> Self {
         self.store = Some(store);
@@ -251,6 +273,7 @@ impl Skybase {
     ///
     /// # Errors
     /// Returns [`SkybaseError::Storage`] if opening the database fails.
+    #[cfg(feature = "storage")]
     pub fn open_store(&mut self, path: impl AsRef<Path>) -> Result<RecordStore> {
         let store = RecordStore::open(path)?;
         self.store = Some(store.clone());
@@ -261,6 +284,7 @@ impl Skybase {
     ///
     /// # Errors
     /// Returns [`SkybaseError::Storage`] if opening the in-memory database fails.
+    #[cfg(feature = "storage")]
     pub fn open_in_memory_store(&mut self) -> Result<RecordStore> {
         let store = RecordStore::open_in_memory()?;
         self.store = Some(store.clone());
@@ -300,6 +324,7 @@ impl Skybase {
     }
 
     /// Returns a reference to the active [`RecordStore`], if initialized.
+    #[cfg(feature = "storage")]
     #[must_use]
     pub fn store(&self) -> Option<&RecordStore> {
         self.store.as_ref()
@@ -309,6 +334,7 @@ impl Skybase {
     ///
     /// # Errors
     /// Returns [`SkybaseError::Config`] if no record store is attached.
+    #[cfg(feature = "storage")]
     pub fn require_store(&self) -> Result<&RecordStore> {
         self.store.as_ref().ok_or_else(|| {
             SkybaseError::Config("RecordStore is not initialized on this Skybase instance".into())
@@ -319,6 +345,7 @@ impl Skybase {
     ///
     /// # Errors
     /// Returns [`SkybaseError::Config`] if no record store is attached.
+    #[cfg(feature = "storage")]
     pub fn query(&self, collection: impl Into<String>) -> Result<QueryBuilder<'_>> {
         Ok(self.require_store()?.query(collection))
     }
@@ -327,6 +354,7 @@ impl Skybase {
     ///
     /// # Errors
     /// Returns [`SkybaseError::Config`] if no record store is attached.
+    #[cfg(feature = "storage")]
     pub fn collection(&self, collection: impl Into<String>) -> Result<QueryBuilder<'_>> {
         self.query(collection)
     }
@@ -335,6 +363,7 @@ impl Skybase {
     ///
     /// # Errors
     /// Returns [`SkybaseError::Config`] if no record store is attached.
+    #[cfg(feature = "storage")]
     pub fn subscribe(&self) -> Result<tokio::sync::broadcast::Receiver<ChangeNotification>> {
         Ok(self.require_store()?.subscribe())
     }
@@ -343,6 +372,7 @@ impl Skybase {
     ///
     /// # Errors
     /// Returns [`SkybaseError::Config`] if `jetstream_endpoint` or `RecordStore` is not configured.
+    #[cfg(feature = "storage")]
     pub fn consumer(&self) -> Result<JetstreamConsumer> {
         let endpoint = self.config.jetstream_endpoint.as_ref().ok_or_else(|| {
             SkybaseError::Config(
@@ -365,6 +395,7 @@ impl Skybase {
     ///
     /// # Errors
     /// Returns [`SkybaseError::Config`] if no record store is attached.
+    #[cfg(feature = "storage")]
     pub fn consumer_with_config(&self, config: IngesterConfig) -> Result<JetstreamConsumer> {
         let store = self.require_store()?.clone();
         Ok(JetstreamConsumer::new(config, store))
@@ -374,6 +405,7 @@ impl Skybase {
     ///
     /// # Errors
     /// Returns [`SkybaseError::Config`] if `jetstream_endpoint` or `RecordStore` is not configured.
+    #[cfg(feature = "storage")]
     pub fn start_consumer(
         &self,
         cancel: tokio_util::sync::CancellationToken,
@@ -386,6 +418,7 @@ impl Skybase {
     ///
     /// # Errors
     /// Returns [`SkybaseError::Config`] if no record store is attached.
+    #[cfg(feature = "storage")]
     pub fn start_consumer_with_config(
         &self,
         config: IngesterConfig,
@@ -496,6 +529,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "storage")]
     #[test]
     fn test_skybase_config_builders() {
         let path = std::path::PathBuf::from("/tmp/skybase_test.db");
@@ -525,6 +559,7 @@ mod tests {
         assert_eq!(config.wanted_dids.len(), 3);
     }
 
+    #[cfg(feature = "storage")]
     #[test]
     fn test_skybase_in_memory_and_store_delegation() {
         let config = SkybaseConfig::new(
@@ -574,6 +609,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "storage")]
     #[test]
     fn test_skybase_uninitialized_store_errors() {
         let config = SkybaseConfig::new(
@@ -596,6 +632,7 @@ mod tests {
         assert!(matches!(skybase.consumer(), Err(SkybaseError::Config(_))));
     }
 
+    #[cfg(feature = "storage")]
     #[test]
     fn test_skybase_with_store_and_open_store() {
         let config = SkybaseConfig::new(
@@ -625,6 +662,7 @@ mod tests {
         let _ = store3;
     }
 
+    #[cfg(feature = "storage")]
     #[tokio::test]
     async fn test_skybase_consumer_wiring() {
         let config = SkybaseConfig::new(

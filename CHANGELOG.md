@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.7] - 2026-11-03
+
+### Added
+
+- **Storage-Agnostic Jetstream Streamer** (`src/ingest/streamer.rs`): Added `run_jetstream_streamer`, `StreamConfig`, `resolve_resume_cursor`, `CURSOR_REWIND_OVERLAP_US`, and `MAX_JETSTREAM_REPLAY_WINDOW_US` with 15-second keepalive pings, idle stall detection, binary UTF-8 frame fallback, and 5-second cursor rewind overlap.
+- **AT-URI & TID Decoding Primitives** (`src/repo/types.rs`, `src/repo/tid.rs`): Added `split_at_uri`, `extract_did_from_at_uri`, `extract_did_for_collection`, `parse_at_post_uri`, `decode_tid_timestamp_us`, and `decode_tid_timestamp_secs`.
+- **PDS Blob Upload** (`src/repo/client.rs`): Added `PdsRepoClient::upload_blob` (`com.atproto.repo.uploadBlob`) with RFC 9449 DPoP proof signing and single-retry `use_dpop_nonce` recovery.
+- **Lexicon Self-Labels & Embed Gallery Extraction** (`src/lexicon/records.rs`, `src/lexicon/mod.rs`): Added `SelfLabel`, `SelfLabels` (`.has_nsfw()`, `.contains()`), `Embed::Gallery`, `Embed::extract_gallery_items`, and `format_unix_secs_iso8601`.
+- **Optional `storage` Feature Flag** (`Cargo.toml`, `src/lib.rs`): Gated `rusqlite` and `index`/`consumer` behind `storage` (enabled by default) so in-memory services can depend on `skybase` with `default-features = false` without compiling SQLite.
+
+### Fixed
+
+- **ATProto Chat Deleted Message Tombstones** (`src/chat/types.rs`): Added `DeletedMessageView` and `ChatMessageView` union deserializers so `ConvoView::last_message` and `GetMessagesResponse::messages` gracefully filter `chat.bsky.convo.defs#deletedMessageView` tombstones without failing deserialization.
+
 ## [0.1.6] - 2026-10-26
 
 ### Security

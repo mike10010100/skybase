@@ -46,6 +46,7 @@ pub enum SkybaseError {
     Internal(String),
 }
 
+#[cfg(feature = "storage")]
 impl From<rusqlite::Error> for SkybaseError {
     fn from(err: rusqlite::Error) -> Self {
         SkybaseError::Storage(err.to_string())

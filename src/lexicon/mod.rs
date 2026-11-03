@@ -10,9 +10,10 @@ pub mod records;
 use serde::{Deserialize, Serialize};
 
 pub use records::{
-    format_system_time_iso8601, now_iso8601, Embed, FollowRecord, ListBlockRecord, ListItemRecord,
-    ListRecordsResponse, ModListRecord, PostRecord, RecordEmbed, RecordWithMediaEmbed, ReplyRef,
-    RepoRecordItem, StrongRef,
+    format_system_time_iso8601, format_unix_secs_iso8601, has_nsfw_self_label, now_iso8601, Embed,
+    FollowRecord, ListBlockRecord, ListItemRecord, ListRecordsResponse, ModListRecord, PostRecord,
+    RecordEmbed, RecordWithMediaEmbed, ReplyRef, RepoRecordItem, SelfLabel, SelfLabels, StrongRef,
+    NSFW_SELF_LABEL_VALUES,
 };
 
 /// UTF-8 byte slice range for rich text facets (`app.bsky.richtext.facet#byteSlice`).

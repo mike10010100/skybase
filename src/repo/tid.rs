@@ -98,6 +98,49 @@ pub fn generate_tid() -> String {
     GLOBAL_TID_GEN.next_tid()
 }
 
+/// Minimum plausible ATProto record timestamp in Unix seconds (2022-11-17T00:00:00Z).
+pub const MIN_PLAUSIBLE_TID_EPOCH_SECS: u64 = 1_668_643_200;
+
+/// Maximum plausible ATProto record timestamp in Unix seconds (2100-01-01T00:00:00Z).
+pub const MAX_PLAUSIBLE_TID_EPOCH_SECS: u64 = 4_102_444_800;
+
+/// Decodes an AT Protocol 13-character base32-sortable TID into a Unix timestamp in microseconds.
+///
+/// Returns `None` if `tid` is not 13 characters, contains characters outside the ATProto
+/// base32-sortable alphabet (`234567abcdefghijklmnopqrstuvwxyz`), or has the reserved top bit set.
+#[must_use]
+pub fn decode_tid_timestamp_us(tid: &str) -> Option<u64> {
+    if tid.len() != 13 {
+        return None;
+    }
+    let mut val: u64 = 0;
+    for b in tid.bytes() {
+        let digit: u64 = match b {
+            b'2'..=b'7' => u64::from(b - b'2'),
+            b'a'..=b'z' => u64::from(b - b'a') + 6,
+            _ => return None,
+        };
+        val = (val << 5) | digit;
+    }
+    if (val >> 63) != 0 {
+        return None;
+    }
+    Some(val >> 10)
+}
+
+/// Decodes an AT Protocol 13-character base32-sortable TID into a Unix timestamp in seconds,
+/// validating that the decoded timestamp lies within [`MIN_PLAUSIBLE_TID_EPOCH_SECS`]..=[`MAX_PLAUSIBLE_TID_EPOCH_SECS`].
+#[must_use]
+pub fn decode_tid_timestamp_secs(tid: &str) -> Option<u64> {
+    let timestamp_us = decode_tid_timestamp_us(tid)?;
+    let timestamp_secs = timestamp_us / 1_000_000;
+    if (MIN_PLAUSIBLE_TID_EPOCH_SECS..=MAX_PLAUSIBLE_TID_EPOCH_SECS).contains(&timestamp_secs) {
+        Some(timestamp_secs)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
 mod tests {
@@ -172,5 +215,9 @@ mod tests {
         assert_eq!(t1.len(), 13);
         assert_eq!(t2.len(), 13);
         assert!(t1 < t2);
+        let decoded_secs = decode_tid_timestamp_secs(&t1).expect("valid TID timestamp");
+        assert!(decoded_secs >= MIN_PLAUSIBLE_TID_EPOCH_SECS);
+        assert!(decode_tid_timestamp_secs("not-a-tid").is_none());
+        assert!(decode_tid_timestamp_secs("2222222222222").is_none());
     }
 }
