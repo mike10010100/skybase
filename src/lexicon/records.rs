@@ -803,5 +803,116 @@ mod tests {
             embed.quote_uri(),
             Some("at://did:plc:alice/app.bsky.feed.post/123")
         );
+        assert_eq!(embed.quote_cid(), Some("bafyquoted"));
+    }
+
+    #[test]
+    fn test_records_builders_gallery_labels_and_unix_secs_iso8601() {
+        let root = StrongRef::new("at://did:plc:root/app.bsky.feed.post/1", "cid_root");
+        let parent = StrongRef::new("at://did:plc:parent/app.bsky.feed.post/2", "cid_parent");
+        let reply = ReplyRef::new(root.clone(), parent);
+        assert_eq!(reply.root_did(), Some("did:plc:root"));
+        assert_eq!(reply.parent_did(), Some("did:plc:parent"));
+
+        let rec_embed = RecordEmbed::new(root);
+        let rwm = RecordWithMediaEmbed::new(
+            rec_embed.clone(),
+            Some(serde_json::json!({
+                "items": [
+                    {"media": {"alt": "gallery alt", "image": {"ref": {"$link": "bafygallery1"}}}},
+                    {"cid": "bafygallery2"}
+                ]
+            })),
+        );
+        let embed_rec = Embed::Record(rec_embed);
+        assert!(embed_rec.is_quote());
+        assert_eq!(embed_rec.quote_cid(), Some("cid_root"));
+        assert!(embed_rec.extract_images().is_empty());
+
+        let embed_rwm = Embed::RecordWithMedia(Box::new(rwm));
+        let rwm_imgs = embed_rwm.extract_images();
+        assert_eq!(rwm_imgs.len(), 2);
+        assert_eq!(
+            rwm_imgs[0],
+            ("bafygallery1".to_string(), "gallery alt".to_string())
+        );
+
+        let embed_gallery = Embed::Gallery(serde_json::json!({
+            "items": [{"alt": "g1", "image": {"cid": "bafyg1"}}]
+        }));
+        assert!(!embed_gallery.is_quote());
+        assert_eq!(embed_gallery.quote_uri(), None);
+        assert_eq!(embed_gallery.quote_cid(), None);
+        assert_eq!(embed_gallery.extract_images().len(), 1);
+        assert!(Embed::extract_gallery_items(&serde_json::json!({})).is_empty());
+
+        let rwm_no_media = Embed::RecordWithMedia(Box::new(RecordWithMediaEmbed::new(
+            RecordEmbed::new(StrongRef::new("at://did:plc:x/col/1", "c")),
+            None,
+        )));
+        assert!(rwm_no_media.extract_images().is_empty());
+
+        // SelfLabel / SelfLabels / has_nsfw_self_label
+        let sl = SelfLabel::new("Porn");
+        let sls = SelfLabels {
+            record_type: None,
+            values: vec![sl],
+        };
+        assert!(sls.has_nsfw());
+        assert!(sls.contains("porn"));
+        assert!(!sls.contains("safe"));
+        assert!(has_nsfw_self_label(&serde_json::json!({
+            "labels": {"values": [{"val": "nudity"}]}
+        })));
+        assert!(has_nsfw_self_label(&serde_json::json!({
+            "labels": {"values": ["suggestive"]}
+        })));
+        assert!(!has_nsfw_self_label(&serde_json::json!({
+            "labels": {"values": [{"val": "clean"}]}
+        })));
+        assert!(!has_nsfw_self_label(&serde_json::json!({})));
+
+        // PostRecord, FollowRecord, ModListRecord::new, ListBlockRecord, format_unix_secs_iso8601
+        let facet = crate::lexicon::Facet::new(
+            crate::lexicon::ByteSlice::new(0, 6),
+            vec![crate::lexicon::FacetFeature::Mention {
+                did: "did:plc:mentioned".to_string(),
+            }],
+        );
+        let post = PostRecord::new("hi @alice", "2026-11-03T00:00:00Z")
+            .with_reply(reply)
+            .with_facets(vec![facet])
+            .with_embed(embed_rec);
+        assert_eq!(
+            post.mentioned_dids().collect::<Vec<_>>(),
+            vec!["did:plc:mentioned"]
+        );
+        assert_eq!(
+            post.quote_uri(),
+            Some("at://did:plc:root/app.bsky.feed.post/1")
+        );
+
+        let follow = FollowRecord::new("did:plc:target", "2026-11-03T00:00:00Z");
+        assert_eq!(follow.subject, "did:plc:target");
+
+        let curatelist = ModListRecord::new(
+            "app.bsky.graph.defs#curatelist",
+            "Curate",
+            None,
+            "2026-11-03T00:00:00Z",
+        );
+        assert!(!curatelist.is_modlist());
+
+        let lb = ListBlockRecord::new(
+            "at://did:plc:alice/app.bsky.graph.list/1",
+            "2026-11-03T00:00:00Z",
+        );
+        assert_eq!(lb.subject, "at://did:plc:alice/app.bsky.graph.list/1");
+
+        assert_eq!(format_unix_secs_iso8601(0), "1970-01-01T00:00:00Z");
+        assert_eq!(
+            format_unix_secs_iso8601(1_790_906_400),
+            "2026-10-02T02:00:00Z"
+        );
     }
 }

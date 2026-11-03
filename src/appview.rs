@@ -438,3 +438,129 @@ impl AppViewClient {
         )
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn test_appview_client_methods_and_wiremock_queries() {
+        let default_client = AppViewClient::default();
+        assert_eq!(default_client.appview_url(), DEFAULT_APPVIEW_ENDPOINT);
+        assert_eq!(default_client.cdn_url(), DEFAULT_CDN_ENDPOINT);
+        let _ = default_client.http_client();
+        assert_eq!(
+            default_client.thumbnail_url("did:plc:alice", "bafy123"),
+            "https://cdn.bsky.app/img/feed_thumbnail/plain/did:plc:alice/bafy123@jpeg"
+        );
+
+        let server = MockServer::start().await;
+        let client = AppViewClient::with_endpoint(server.uri());
+
+        // DID passthrough in resolve_handle
+        assert_eq!(
+            client.resolve_handle("@did:plc:alice123").await.as_deref(),
+            Some("did:plc:alice123")
+        );
+
+        Mock::given(method("GET"))
+            .and(path("/xrpc/com.atproto.identity.resolveHandle"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"did": "did:plc:alice123"})),
+            )
+            .mount(&server)
+            .await;
+        assert_eq!(
+            client.resolve_handle("@alice").await.as_deref(),
+            Some("did:plc:alice123")
+        );
+
+        // search_actors_typeahead
+        assert!(client.search_actors_typeahead("  @  ", 10).await.is_empty());
+        Mock::given(method("GET"))
+            .and(path("/xrpc/app.bsky.actor.searchActorsTypeahead"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "actors": [{"did": "did:plc:alice123", "handle": "alice.bsky.social", "displayName": "Alice"}]
+            })))
+            .mount(&server)
+            .await;
+        let suggestions = client.search_actors_typeahead("alice", 5).await;
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].did, "did:plc:alice123");
+
+        // fetch_profile, fetch_post, fetch_follows, fetch_followers, fetch_follow_records
+        Mock::given(method("GET"))
+            .and(path("/xrpc/app.bsky.actor.getProfile"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "did": "did:plc:alice123",
+                "handle": "alice.bsky.social",
+                "displayName": "Alice",
+                "followersCount": 100,
+                "followsCount": 50
+            })))
+            .mount(&server)
+            .await;
+        let prof = client.fetch_profile("did:plc:alice123").await.unwrap();
+        assert_eq!(prof.handle.as_deref(), Some("alice.bsky.social"));
+
+        Mock::given(method("GET"))
+            .and(path("/xrpc/app.bsky.feed.getPosts"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "posts": [{
+                    "author": {"did": "did:plc:alice123"},
+                    "record": {"text": "post body"},
+                    "cid": "bafypost"
+                }]
+            })))
+            .mount(&server)
+            .await;
+        let post = client
+            .fetch_post("at://did:plc:alice123/app.bsky.feed.post/1")
+            .await
+            .unwrap();
+        assert_eq!(post.text, "post body");
+
+        Mock::given(method("GET"))
+            .and(path("/xrpc/app.bsky.graph.getFollows"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "follows": [{"did": "did:plc:f1"}]
+            })))
+            .mount(&server)
+            .await;
+        assert_eq!(
+            client.fetch_follows("did:plc:alice123", 10).await,
+            vec!["did:plc:f1"]
+        );
+
+        Mock::given(method("GET"))
+            .and(path("/xrpc/app.bsky.graph.getFollowers"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "followers": [{"did": "did:plc:fl1"}]
+            })))
+            .mount(&server)
+            .await;
+        assert_eq!(
+            client.fetch_followers("did:plc:alice123", 10).await,
+            vec!["did:plc:fl1"]
+        );
+
+        Mock::given(method("GET"))
+            .and(path("/xrpc/com.atproto.repo.listRecords"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "records": [{
+                    "uri": "at://did:plc:alice123/app.bsky.graph.follow/rkey1",
+                    "value": {"subject": "did:plc:f1"}
+                }]
+            })))
+            .mount(&server)
+            .await;
+        assert_eq!(
+            client.fetch_follow_records("did:plc:alice123", 10).await,
+            vec![("rkey1".to_string(), "did:plc:f1".to_string())]
+        );
+    }
+}

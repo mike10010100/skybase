@@ -632,3 +632,174 @@ impl ChatClient {
         )))
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn test_chat_client_login_and_endpoints_and_auto_refresh() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/xrpc/com.atproto.server.createSession"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "did": "did:plc:bot123",
+                "accessJwt": "tok_initial",
+                "refreshJwt": "ref_initial"
+            })))
+            .mount(&server)
+            .await;
+
+        let (client, bot_did) = ChatClient::login_with_app_password(
+            &server.uri(),
+            &server.uri(),
+            "bot.bsky.social",
+            "app-pass",
+        )
+        .await
+        .unwrap();
+        assert_eq!(bot_did, "did:plc:bot123");
+        assert_eq!(client.current_access_token().await, "tok_initial");
+
+        // list_convos with limit & cursor
+        Mock::given(method("GET"))
+            .and(path("/xrpc/chat.bsky.convo.listConvos"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "convos": [{
+                    "id": "convo-1",
+                    "rev": "r1",
+                    "members": [{"did": "did:plc:alice", "handle": "alice.bsky.social"}],
+                    "unreadCount": 1
+                }],
+                "cursor": "c1"
+            })))
+            .mount(&server)
+            .await;
+        let convos = client.list_convos(Some(10), Some("c0")).await.unwrap();
+        assert_eq!(convos.convos.len(), 1);
+
+        // list_convo_requests & accept_convo
+        Mock::given(method("GET"))
+            .and(path("/xrpc/chat.bsky.convo.listConvoRequests"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "requests": [{"id": "req-1", "rev": "r1", "members": [], "unreadCount": 0}],
+                "cursor": "rc1"
+            })))
+            .mount(&server)
+            .await;
+        let reqs = client
+            .list_convo_requests(Some(5), Some("rc0"))
+            .await
+            .unwrap();
+        assert_eq!(reqs.requests.len(), 1);
+
+        Mock::given(method("POST"))
+            .and(path("/xrpc/chat.bsky.convo.acceptConvo"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"rev": "r2"})),
+            )
+            .mount(&server)
+            .await;
+        let accepted = client.accept_convo("req-1").await.unwrap();
+        assert_eq!(accepted.rev.as_deref(), Some("r2"));
+
+        // get_messages, send_message, update_read
+        Mock::given(method("GET"))
+            .and(path("/xrpc/chat.bsky.convo.getMessages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "messages": [{
+                    "$type": "chat.bsky.convo.defs#messageView",
+                    "id": "m1",
+                    "rev": "r1",
+                    "text": "hello",
+                    "sender": {"did": "did:plc:alice"},
+                    "sentAt": "2026-11-03T00:00:00Z"
+                }]
+            })))
+            .mount(&server)
+            .await;
+        let msgs = client
+            .get_messages("convo-1", Some(10), Some("mc0"))
+            .await
+            .unwrap();
+        assert_eq!(msgs.messages.len(), 1);
+
+        Mock::given(method("POST"))
+            .and(path("/xrpc/chat.bsky.convo.sendMessage"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "m2",
+                "rev": "r2",
+                "text": "reply https://example.com",
+                "sender": {"did": "did:plc:bot123"},
+                "sentAt": "2026-11-03T00:00:01Z"
+            })))
+            .mount(&server)
+            .await;
+        let sent = client
+            .send_message("convo-1", "reply https://example.com")
+            .await
+            .unwrap();
+        assert_eq!(sent.id, "m2");
+
+        Mock::given(method("POST"))
+            .and(path("/xrpc/chat.bsky.convo.updateRead"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        client.update_read("convo-1", "m2").await.unwrap();
+
+        // find_or_create_convo_for_did: fallback to list_convos when getConvoForMembers returns 500
+        Mock::given(method("GET"))
+            .and(path("/xrpc/chat.bsky.convo.getConvoForMembers"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("err"))
+            .mount(&server)
+            .await;
+        let found_id = client
+            .find_or_create_convo_for_did("did:plc:alice")
+            .await
+            .unwrap();
+        assert_eq!(found_id, "convo-1");
+        assert!(client
+            .find_or_create_convo_for_did("did:plc:unknown")
+            .await
+            .is_err());
+
+        // Test refresh_session_or_relogin via refreshSession success
+        Mock::given(method("POST"))
+            .and(path("/xrpc/com.atproto.server.refreshSession"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "accessJwt": "tok_refreshed",
+                "refreshJwt": "ref_rotated"
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        client
+            .refresh_session_or_relogin("tok_initial")
+            .await
+            .unwrap();
+        assert_eq!(client.current_access_token().await, "tok_refreshed");
+
+        // Already refreshed token is a no-op
+        client
+            .refresh_session_or_relogin("tok_initial")
+            .await
+            .unwrap();
+
+        // When refreshSession fails, falls back to createSession re-login
+        Mock::given(method("POST"))
+            .and(path("/xrpc/com.atproto.server.refreshSession"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("ExpiredToken"))
+            .mount(&server)
+            .await;
+        client
+            .refresh_session_or_relogin("tok_refreshed")
+            .await
+            .unwrap();
+        assert_eq!(client.current_access_token().await, "tok_initial");
+    }
+}
