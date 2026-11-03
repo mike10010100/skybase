@@ -135,7 +135,10 @@ cargo test --all-targets
 # 4. Run documentation tests
 cargo test --doc
 
-# 5. Dependency security & policy scan
+# 5. Enforce line coverage threshold (≥ 85%)
+cargo llvm-cov --all-targets --all-features --fail-under-lines 85
+
+# 6. Dependency security & policy scan
 cargo deny check
 ```
 

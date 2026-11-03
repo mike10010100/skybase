@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.8] - 2026-11-03
+
+### Added
+
+- **CI Code Coverage Gate & Expanded Test Suites** (`src/ingest/streamer.rs`, `src/lexicon/records.rs`, `src/chat/client.rs`, `src/appview.rs`, `.github/workflows/ci.yml`, `AGENTS.md`):
+  - Added in-process WebSocket integration tests for `run_jetstream_streamer` (`92.33%` line coverage), `wiremock` integration tests for `ChatClient` (`85.03%`) and `AppViewClient` (`97.03%`), and comprehensive unit tests for `lexicon::records` (`99.16%`), raising crate-wide line coverage from `80.48%` to `90.85%`.
+  - Added `cargo llvm-cov --all-targets --all-features --fail-under-lines 85` to `.github/workflows/ci.yml` and `AGENTS.md`.
+- **Upgraded `skyauth` to `0.3.11`** (`Cargo.toml`): Incorporates Verus and Kani formal verification for `service_auth` Multikey and curve-to-JOSE-alg binding kernels.
+
 ## [0.1.7] - 2026-11-03
 
 ### Added

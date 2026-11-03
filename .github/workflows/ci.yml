@@ -55,7 +55,7 @@ jobs:
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
+          components: clippy, rustfmt, llvm-tools-preview
 
       - name: Enable Rust Cache
         uses: Swatinem/rust-cache@v2
@@ -64,10 +64,10 @@ jobs:
             skybase -> skybase/target
             skyauth -> skyauth/target
 
-      - name: Install Cargo Deny
+      - name: Install Cargo Deny & llvm-cov
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-deny
+          tool: cargo-deny,cargo-llvm-cov
 
       - name: 1. Enforce Code Formatting
         working-directory: skybase
@@ -79,10 +79,10 @@ jobs:
           cargo clippy --all-targets --all-features -- -D warnings
           cargo clippy --lib --no-default-features -- -D warnings
 
-      - name: 3. Run All Test Suites
+      - name: 3. Run All Test Suites & Coverage Gate (≥ 85%)
         working-directory: skybase
         run: |
-          cargo test --all-targets --all-features
+          cargo llvm-cov --all-targets --all-features --fail-under-lines 85
           cargo test --lib --no-default-features
 
       - name: 4. Dependency Governance & Advisory Scan (cargo-deny)

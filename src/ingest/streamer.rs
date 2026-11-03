@@ -396,11 +396,198 @@ mod tests {
 
     #[test]
     fn test_stream_config_url_building() {
-        let cfg = StreamConfig::new("wss://example.test/subscribe")
-            .with_collection("app.bsky.feed.post")
-            .with_cursor(1_700_000_000_000_000);
+        let default_cfg = StreamConfig::default();
+        assert_eq!(default_cfg.endpoint, DEFAULT_JETSTREAM_ENDPOINT);
+
+        let cfg = StreamConfig::new("example.test")
+            .with_collections(["app.bsky.feed.post"])
+            .with_collection("app.bsky.feed.like")
+            .with_did("did:plc:alice123")
+            .with_cursor(1_700_000_000_000_000)
+            .with_read_timeout(Duration::from_millis(10))
+            .with_ping_interval(Some(Duration::from_millis(50)));
+        assert_eq!(cfg.read_timeout, Duration::from_millis(50));
         let url = cfg.build_url();
+        assert!(url.starts_with("wss://example.test/?"));
         assert!(url.contains("wantedCollections=app.bsky.feed.post"));
+        assert!(url.contains("wantedCollections=app.bsky.feed.like"));
+        assert!(url.contains("wantedDids=did:plc:alice123"));
         assert!(url.contains("cursor=1700000000000000"));
+
+        let cfg_zero = cfg.with_cursor(0);
+        assert!(cfg_zero.cursor.is_none());
+
+        let existing_q =
+            build_subscription_url("ws://127.0.0.1:9000/sub?foo=1", &["col.a".into()], Some(42));
+        assert_eq!(
+            existing_q,
+            "ws://127.0.0.1:9000/sub?foo=1&wantedCollections=col.a&cursor=42"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_jetstream_streamer_text_binary_ping_reconnect_and_cancel() {
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::accept_async;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server_task = tokio::spawn(async move {
+            // Connection 1: send Ping, Text commit, Binary commit, then Close to trigger reconnect
+            let (tcp1, _) = listener.accept().await.unwrap();
+            let mut ws1 = accept_async(tcp1).await.unwrap();
+
+            ws1.send(Message::Ping(vec![1, 2, 3].into())).await.unwrap();
+            // Read either Pong or client keepalive Ping
+            let _ = ws1.next().await;
+
+            let frame1 = serde_json::json!({
+                "did": "did:plc:alice123",
+                "time_us": 1_700_000_010_000_000u64,
+                "kind": "commit",
+                "commit": {
+                    "rev": "3k2a",
+                    "operation": "create",
+                    "collection": "app.bsky.feed.post",
+                    "rkey": "r1",
+                    "record": {"text": "hello text"},
+                    "cid": "bafy1"
+                }
+            })
+            .to_string();
+            ws1.send(Message::Text(frame1.into())).await.unwrap();
+
+            let frame2 = serde_json::json!({
+                "did": "did:plc:bob123",
+                "time_us": 1_700_000_020_000_000u64,
+                "kind": "commit",
+                "commit": {
+                    "rev": "3k2b",
+                    "operation": "delete",
+                    "collection": "app.bsky.feed.post",
+                    "rkey": "r2"
+                }
+            })
+            .to_string();
+            ws1.send(Message::Binary(frame2.into_bytes().into()))
+                .await
+                .unwrap();
+
+            ws1.send(Message::Close(None)).await.unwrap();
+
+            // Connection 2: stall until client read_timeout disconnects, then Connection 3 sends final commit
+            if let Ok((tcp2, _)) = listener.accept().await {
+                let mut ws2 = accept_async(tcp2).await.unwrap();
+                let frame3 = serde_json::json!({
+                    "did": "did:plc:carol123",
+                    "time_us": 1_700_000_030_000_000u64,
+                    "kind": "commit",
+                    "commit": {
+                        "rev": "3k2c",
+                        "operation": "create",
+                        "collection": "app.bsky.feed.like",
+                        "rkey": "r3",
+                        "record": {},
+                        "cid": "bafy3"
+                    }
+                })
+                .to_string();
+                let _ = ws2.send(Message::Text(frame3.into())).await;
+                // Keep open silently so client cancels cleanly
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        });
+
+        let (tx, mut rx) = mpsc::channel(16);
+        let cancel = CancellationToken::new();
+        let cfg = StreamConfig::new(format!("ws://{addr}/subscribe"))
+            .with_collection("app.bsky.feed.post")
+            .with_cursor(1_700_000_000_000_000)
+            .with_read_timeout(Duration::from_millis(150))
+            .with_ping_interval(Some(Duration::from_millis(40)));
+
+        let cancel_clone = cancel.clone();
+        let streamer_handle = tokio::spawn(async move {
+            run_jetstream_streamer(cfg, tx, cancel_clone).await.unwrap();
+        });
+
+        let c1 = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(c1.did, "did:plc:alice123");
+        assert_eq!(c1.rkey, "r1");
+
+        let c2 = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(c2.did, "did:plc:bob123");
+        assert_eq!(c2.rkey, "r2");
+
+        let c3 = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(c3.did, "did:plc:carol123");
+        assert_eq!(c3.rkey, "r3");
+
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(2), streamer_handle)
+            .await
+            .unwrap()
+            .unwrap();
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn test_run_jetstream_streamer_idle_timeout_and_receiver_drop() {
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::accept_async;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server_task = tokio::spawn(async move {
+            // Connection 1: stall past read_timeout
+            let (tcp1, _) = listener.accept().await.unwrap();
+            let _ws1 = accept_async(tcp1).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(120)).await;
+
+            // Connection 2: send a commit after receiver is dropped
+            if let Ok((tcp2, _)) = listener.accept().await {
+                let mut ws2 = accept_async(tcp2).await.unwrap();
+                let frame = serde_json::json!({
+                    "did": "did:plc:dropped",
+                    "time_us": 1_700_000_040_000_000u64,
+                    "kind": "commit",
+                    "commit": {
+                        "rev": "3k2d",
+                        "operation": "delete",
+                        "collection": "app.bsky.feed.post",
+                        "rkey": "r4"
+                    }
+                })
+                .to_string();
+                let _ = ws2.send(Message::Text(frame.into())).await;
+            }
+        });
+
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let cancel = CancellationToken::new();
+        let cfg = StreamConfig::new(format!("ws://{addr}/subscribe"))
+            .with_read_timeout(Duration::from_millis(50))
+            .with_ping_interval(None);
+
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            run_jetstream_streamer(cfg, tx, cancel),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        server_task.abort();
     }
 }
