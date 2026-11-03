@@ -130,6 +130,9 @@ pub enum Embed {
     /// Image attachments (`app.bsky.embed.images`).
     #[serde(rename = "app.bsky.embed.images")]
     Images(serde_json::Value),
+    /// Image/media gallery embed (`app.bsky.embed.gallery`).
+    #[serde(rename = "app.bsky.embed.gallery")]
+    Gallery(serde_json::Value),
     /// External card embed (`app.bsky.embed.external`).
     #[serde(rename = "app.bsky.embed.external")]
     External(serde_json::Value),
@@ -170,21 +173,66 @@ impl Embed {
 
     /// Extracts all attached image CIDs and optional alt texts from this embed.
     ///
-    /// Supports both direct image embeds (`app.bsky.embed.images`) and composite
-    /// quote-with-media embeds (`app.bsky.embed.recordWithMedia`).
+    /// Supports direct image embeds (`app.bsky.embed.images`), gallery embeds
+    /// (`app.bsky.embed.gallery`), and composite quote-with-media embeds (`app.bsky.embed.recordWithMedia`).
     #[must_use]
     pub fn extract_images(&self) -> Vec<(String, String)> {
         match self {
             Self::Images(val) => Self::extract_images_from_value(val),
+            Self::Gallery(val) => Self::extract_gallery_items(val),
             Self::RecordWithMedia(rwm) => {
                 if let Some(ref media) = rwm.media {
-                    Self::extract_images_from_value(media)
+                    let mut imgs = Self::extract_images_from_value(media);
+                    if imgs.is_empty() {
+                        imgs = Self::extract_gallery_items(media);
+                    }
+                    imgs
                 } else {
                     Vec::new()
                 }
             }
             _ => Vec::new(),
         }
+    }
+
+    /// Extracts `(cid, alt)` pairs from an `app.bsky.embed.gallery` (or `images`) JSON object.
+    #[must_use]
+    pub fn extract_gallery_items(val: &serde_json::Value) -> Vec<(String, String)> {
+        let Some(items) = val
+            .get("items")
+            .or_else(|| val.get("images"))
+            .and_then(|v| v.as_array())
+        else {
+            return Vec::new();
+        };
+
+        let mut results = Vec::with_capacity(items.len());
+        for item in items {
+            let alt = item
+                .get("alt")
+                .or_else(|| item.get("media").and_then(|m| m.get("alt")))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+
+            let img_obj = item
+                .get("image")
+                .or_else(|| item.get("media").and_then(|m| m.get("image")));
+
+            let cid = img_obj
+                .and_then(|img| {
+                    img.get("ref")
+                        .and_then(|r| r.get("$link"))
+                        .and_then(|l| l.as_str())
+                        .or_else(|| img.get("cid").and_then(|c| c.as_str()))
+                })
+                .or_else(|| item.get("cid").and_then(|c| c.as_str()));
+
+            if let Some(c) = cid.filter(|s| !s.is_empty()) {
+                results.push((c.to_string(), alt));
+            }
+        }
+        results
     }
 
     /// Internal helper extracting `(cid, alt)` pairs from an arbitrary JSON value.
@@ -226,6 +274,112 @@ impl Embed {
     }
 }
 
+/// Self-label values that classify a post as adult / NSFW content.
+///
+/// Mirrors the content-warning vocabulary used by `ATProto` clients for
+/// `com.atproto.label.defs#selfLabels` (e.g. `porn`, `sexual`, `nudity`).
+pub const NSFW_SELF_LABEL_VALUES: [&str; 8] = [
+    "porn",
+    "sexual",
+    "nudity",
+    "graphic-media",
+    "graphic",
+    "adult",
+    "nsfw",
+    "suggestive",
+];
+
+/// Returns `true` if a post record carries an adult / NSFW author self-label.
+///
+/// Reads the `labels` object (`com.atproto.label.defs#selfLabels`) and inspects
+/// its `values` array. Entries may be either `{ "val": "..." }` objects or bare
+/// strings; comparison is case-insensitive.
+#[must_use]
+pub fn has_nsfw_self_label(record: &serde_json::Value) -> bool {
+    let Some(values) = record
+        .get("labels")
+        .and_then(|labels| labels.get("values"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+
+    values.iter().any(|entry| {
+        let raw = entry
+            .get("val")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| entry.as_str());
+        raw.is_some_and(|val| {
+            let trimmed = val.trim();
+            NSFW_SELF_LABEL_VALUES
+                .iter()
+                .any(|nsfw| trimmed.eq_ignore_ascii_case(nsfw))
+                || SelfLabels::NSFW_LABELS
+                    .iter()
+                    .any(|nsfw| trimmed.eq_ignore_ascii_case(nsfw))
+        })
+    })
+}
+
+/// Single self-applied label value (`com.atproto.label.defs#selfLabel`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SelfLabel {
+    /// The short string name of the value or type of this label (e.g., `"porn"`, `"sexual"`, `"nudity"`, `"graphic-media"`).
+    pub val: String,
+}
+
+impl SelfLabel {
+    /// Creates a new [`SelfLabel`].
+    #[must_use]
+    pub fn new(val: impl Into<String>) -> Self {
+        Self { val: val.into() }
+    }
+}
+
+/// Metadata tag container on a record published by the author (`com.atproto.label.defs#selfLabels`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelfLabels {
+    /// Optional lexicon type discriminator (`com.atproto.label.defs#selfLabels`).
+    #[serde(rename = "$type", default, skip_serializing_if = "Option::is_none")]
+    pub record_type: Option<String>,
+    /// Array of self-applied label values.
+    #[serde(default)]
+    pub values: Vec<SelfLabel>,
+}
+
+impl SelfLabels {
+    /// Standard ATProto adult/NSFW content self-label identifiers.
+    pub const NSFW_LABELS: &'static [&'static str] = &[
+        "porn",
+        "sexual",
+        "nudity",
+        "nsfw",
+        "graphic-media",
+        "gore",
+        "corpse",
+        "adult",
+    ];
+
+    /// Returns `true` if any self-label matches a standard NSFW / adult-content label (case-insensitively).
+    #[must_use]
+    pub fn has_nsfw(&self) -> bool {
+        self.values.iter().any(|l| {
+            let trimmed = l.val.trim();
+            Self::NSFW_LABELS
+                .iter()
+                .any(|nsfw| trimmed.eq_ignore_ascii_case(nsfw))
+        })
+    }
+
+    /// Returns `true` if any self-label matches `target` case-insensitively.
+    #[must_use]
+    pub fn contains(&self, target: &str) -> bool {
+        self.values
+            .iter()
+            .any(|l| l.val.trim().eq_ignore_ascii_case(target))
+    }
+}
+
 /// ATProto post record model (`app.bsky.feed.post`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -254,6 +408,9 @@ pub struct PostRecord {
     /// Optional post hashtags or category tags.
     #[serde(default)]
     pub tags: Option<Vec<String>>,
+    /// Optional self-applied content labels (`com.atproto.label.defs#selfLabels`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<SelfLabels>,
 }
 
 impl PostRecord {
@@ -269,6 +426,7 @@ impl PostRecord {
             created_at: created_at.into(),
             langs: None,
             tags: None,
+            labels: None,
         }
     }
 
@@ -354,6 +512,9 @@ pub struct ModListRecord {
     /// Optional avatar blob reference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar: Option<serde_json::Value>,
+    /// Optional self-applied content labels (`com.atproto.label.defs#selfLabels`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<SelfLabels>,
     /// ISO-8601 creation timestamp.
     pub created_at: String,
 }
@@ -373,6 +534,7 @@ impl ModListRecord {
             description,
             description_facets: None,
             avatar: None,
+            labels: None,
             created_at: created_at.into(),
         }
     }
@@ -392,6 +554,7 @@ impl ModListRecord {
             description,
             description_facets: None,
             avatar: None,
+            labels: None,
             created_at: created_at.into(),
         }
     }
@@ -516,6 +679,29 @@ pub fn format_system_time_iso8601(time: std::time::SystemTime) -> String {
 #[must_use]
 pub fn now_iso8601() -> String {
     format_system_time_iso8601(std::time::SystemTime::now())
+}
+
+/// Formats a Unix timestamp in whole seconds into an ISO-8601 / RFC 3339 UTC timestamp string (`YYYY-MM-DDTHH:MM:SSZ`).
+#[must_use]
+pub fn format_unix_secs_iso8601(secs: u64) -> String {
+    let mut days = secs / 86400;
+    let day_secs = secs % 86400;
+    let hours = day_secs / 3600;
+    let mins = (day_secs % 3600) / 60;
+    let seconds = day_secs % 60;
+
+    days += 719_468;
+    let era = days / 146_097;
+    let doe = days - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    format!("{y:04}-{m:02}-{d:02}T{hours:02}:{mins:02}:{seconds:02}Z")
 }
 
 #[cfg(test)]

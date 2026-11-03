@@ -7,7 +7,9 @@
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "storage")]
 use crate::error::Result;
+#[cfg(feature = "storage")]
 use crate::index::{RecordInput, RecordStore};
 
 /// Returns the Jetstream event timestamp in microseconds.
@@ -134,6 +136,7 @@ impl JetstreamCommit {
     ///
     /// Returns `None` if the operation is [`CommitOperation::Delete`] or if `record`
     /// is missing on a `Create` or `Update` operation.
+    #[cfg(feature = "storage")]
     #[must_use]
     pub fn to_record_input(&self, indexed_at_timestamp: Option<u64>) -> Option<RecordInput> {
         if self.operation == CommitOperation::Delete {
@@ -386,6 +389,7 @@ pub fn parse_jetstream_commit(text: &str) -> Option<JetstreamCommit> {
 ///
 /// # Errors
 /// Returns [`crate::error::SkybaseError::Storage`] or [`crate::error::SkybaseError::Serialization`] if the SQLite mutation fails.
+#[cfg(feature = "storage")]
 pub fn sync_commit_to_store(store: &RecordStore, commit: &JetstreamCommit) -> Result<()> {
     let uri = commit.uri();
 
@@ -411,6 +415,7 @@ pub fn sync_commit_to_store(store: &RecordStore, commit: &JetstreamCommit) -> Re
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
 mod tests {
     use super::*;
+    #[cfg(feature = "storage")]
     use serde_json::json;
 
     #[test]
@@ -459,8 +464,11 @@ mod tests {
                 assert_eq!(c.operation, CommitOperation::Create);
                 assert_eq!(c.cid.as_deref(), Some("bafyrei1"));
                 assert_eq!(c.uri(), "at://did:plc:alice/app.bsky.feed.post/post1");
-                let input = c.to_record_input(None).expect("to record input");
-                assert_eq!(input.indexed_at, 1710000000123456);
+                #[cfg(feature = "storage")]
+                {
+                    let input = c.to_record_input(None).expect("to record input");
+                    assert_eq!(input.indexed_at, 1710000000123456);
+                }
             }
             _ => panic!("Expected commit event"),
         }
@@ -486,6 +494,7 @@ mod tests {
         assert_eq!(parse_jetstream_frame("42"), None);
     }
 
+    #[cfg(feature = "storage")]
     #[test]
     fn test_sync_commit_to_store() {
         let store = RecordStore::open_in_memory().expect("open store");

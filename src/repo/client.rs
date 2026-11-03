@@ -390,6 +390,34 @@ impl PdsRepoClient {
         Ok(record_view)
     }
 
+    /// Uploads a binary blob to the sovereign PDS repository via `com.atproto.repo.uploadBlob`.
+    ///
+    /// # Arguments
+    /// - `mime_type`: The MIME content type of the blob (e.g. `"image/png"`).
+    /// - `bytes`: Raw binary payload of the blob.
+    ///
+    /// # Returns
+    /// The JSON `blob` descriptor returned by the PDS (`{ "$type": "blob", "ref": ..., "mimeType": ..., "size": ... }`).
+    ///
+    /// # Errors
+    /// Returns [`SkybaseError::Repo`] if the response omits the `blob` object,
+    /// [`SkybaseError::Network`] on transport failure, or [`SkybaseError::Serialization`] on JSON errors.
+    pub async fn upload_blob(&self, mime_type: &str, bytes: Vec<u8>) -> Result<serde_json::Value> {
+        let url = self.build_xrpc_url("com.atproto.repo.uploadBlob")?;
+        let resp = self
+            .send_with_nonce_retry_content_type(Method::POST, &url, mime_type, Some(bytes))
+            .await?;
+
+        let resp_bytes = read_bounded_bytes(resp, MAX_SUCCESS_BODY_BYTES).await?;
+        let res_json: serde_json::Value =
+            serde_json::from_slice(&resp_bytes).map_err(SkybaseError::Serialization)?;
+
+        res_json
+            .get("blob")
+            .cloned()
+            .ok_or_else(|| SkybaseError::Repo("Missing 'blob' in uploadBlob response".into()))
+    }
+
     /// Constructs the full target XRPC URL for a given NSID method.
     fn build_xrpc_url(&self, nsid: &str) -> Result<String> {
         let endpoint = self.pds_endpoint()?;
@@ -423,6 +451,17 @@ impl PdsRepoClient {
         &self,
         method: Method,
         url_str: &str,
+        body_bytes: Option<Vec<u8>>,
+    ) -> Result<reqwest::Response> {
+        self.send_with_nonce_retry_content_type(method, url_str, "application/json", body_bytes)
+            .await
+    }
+
+    async fn send_with_nonce_retry_content_type(
+        &self,
+        method: Method,
+        url_str: &str,
+        content_type: &str,
         body_bytes: Option<Vec<u8>>,
     ) -> Result<reqwest::Response> {
         if self.session.is_expired() {
@@ -464,7 +503,7 @@ impl PdsRepoClient {
                 .request(method.clone(), parsed_url.clone())
                 .header("Authorization", self.session.dpop_auth_header())
                 .header("DPoP", dpop_proof)
-                .header("Content-Type", "application/json")
+                .header("Content-Type", content_type)
                 .header("Accept", "application/json");
 
             if let Some(ref bytes) = body_bytes {

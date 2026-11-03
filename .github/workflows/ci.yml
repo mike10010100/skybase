@@ -75,11 +75,15 @@ jobs:
 
       - name: 2. Enforce Strict Clippy Lints
         working-directory: skybase
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: |
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo clippy --lib --no-default-features -- -D warnings
 
       - name: 3. Run All Test Suites
         working-directory: skybase
-        run: cargo test --all-targets --all-features
+        run: |
+          cargo test --all-targets --all-features
+          cargo test --lib --no-default-features
 
       - name: 4. Dependency Governance & Advisory Scan (cargo-deny)
         working-directory: skybase

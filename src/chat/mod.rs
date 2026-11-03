@@ -9,7 +9,7 @@ pub mod types;
 
 pub use client::{ChatClient, ATPROTO_CHAT_PROXY_DID, DEFAULT_CHAT_ENDPOINT};
 pub use types::{
-    AcceptConvoRequest, AcceptConvoResponse, ConvoMember, ConvoView, GetMessagesResponse,
-    ListConvoRequestsResponse, ListConvosResponse, MessageSender, MessageView, SendMessagePayload,
-    SendMessageRequest, UpdateReadRequest,
+    AcceptConvoRequest, AcceptConvoResponse, ChatMessageView, ConvoMember, ConvoView,
+    DeletedMessageView, GetMessagesResponse, ListConvoRequestsResponse, ListConvosResponse,
+    MessageSender, MessageView, SendMessagePayload, SendMessageRequest, UpdateReadRequest,
 };
