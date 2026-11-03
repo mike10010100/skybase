@@ -1695,7 +1695,7 @@ dependencies = [
 
 [[package]]
 name = "skyauth"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "aes-gcm",
  "ahash",
@@ -1724,7 +1724,7 @@ dependencies = [
 
 [[package]]
 name = "skybase"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "axum",
  "base64 0.23.1",
