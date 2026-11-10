@@ -26,6 +26,7 @@ pub const DEFAULT_MAX_PAGES: usize = 100;
 
 /// Profile metadata returned by `app.bsky.actor.getProfile`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ActorProfile {
     /// Subject Decentralized Identifier (`did:plc:...` or `did:web:...`), if returned.
     #[serde(default)]
@@ -33,6 +34,7 @@ pub struct ActorProfile {
     /// Author handle (e.g. `"alice.bsky.social"`).
     pub handle: Option<String>,
     /// User-defined display name.
+    #[serde(alias = "display_name")]
     pub display_name: Option<String>,
     /// Profile avatar image URL.
     #[serde(default)]
@@ -40,10 +42,13 @@ pub struct ActorProfile {
     /// Profile description / bio text.
     pub description: Option<String>,
     /// Count of accounts following this author.
+    #[serde(alias = "followers_count")]
     pub followers_count: Option<u64>,
     /// Count of accounts followed by this author.
+    #[serde(alias = "follows_count")]
     pub follows_count: Option<u64>,
     /// Account registration timestamp in ISO 8601 format.
+    #[serde(alias = "created_at")]
     pub created_at: Option<String>,
 }
 
@@ -199,7 +204,10 @@ impl AppViewClient {
             let (page, next_cursor) = extract(body);
             let count = page.len();
             items.extend(page);
-            if count == 0 || next_cursor.is_none() {
+            if count == 0
+                || next_cursor.as_deref().is_none_or(str::is_empty)
+                || next_cursor == cursor
+            {
                 break;
             }
             cursor = next_cursor;
@@ -506,6 +514,9 @@ mod tests {
             .await;
         let prof = client.fetch_profile("did:plc:alice123").await.unwrap();
         assert_eq!(prof.handle.as_deref(), Some("alice.bsky.social"));
+        assert_eq!(prof.display_name.as_deref(), Some("Alice"));
+        assert_eq!(prof.followers_count, Some(100));
+        assert_eq!(prof.follows_count, Some(50));
 
         Mock::given(method("GET"))
             .and(path("/xrpc/app.bsky.feed.getPosts"))

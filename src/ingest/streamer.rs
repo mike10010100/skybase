@@ -267,12 +267,22 @@ pub async fn run_jetstream_streamer(
         let url = active_config.build_url();
         info!(endpoint = %url, cursor = ?active_config.cursor, "Connecting to Jetstream firehose");
 
-        match connect_async(&url).await {
+        let connect_res = tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                info!("Streamer received cancellation signal during connect");
+                return Ok(());
+            }
+            res = connect_async(&url) => res,
+        };
+
+        match connect_res {
             Ok((ws_stream, response)) => {
                 debug!(status = %response.status(), "WebSocket connection established");
                 let (mut write_half, mut read_half) = ws_stream.split();
                 let ping_dur = active_config
                     .ping_interval
+                    .filter(|d| *d > Duration::ZERO)
                     .unwrap_or(Duration::from_secs(3600));
                 let mut ping_timer = tokio::time::interval_at(Instant::now() + ping_dur, ping_dur);
 
@@ -284,7 +294,7 @@ pub async fn run_jetstream_streamer(
                             let _ = write_half.send(Message::Close(None)).await;
                             return Ok(());
                         }
-                        _ = ping_timer.tick(), if active_config.ping_interval.is_some() => {
+                        _ = ping_timer.tick(), if active_config.ping_interval.is_some_and(|d| d > Duration::ZERO) => {
                             if let Err(e) = write_half.send(Message::Ping(Vec::new().into())).await {
                                 warn!(error = %e, "Failed to send WebSocket keepalive ping; reconnecting");
                                 break;

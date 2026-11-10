@@ -640,6 +640,30 @@ async fn run_reader_reconnect_loop(
                                 Message::Binary(bin) => {
                                     stats.frames_received.fetch_add(1, Ordering::Relaxed);
                                     stats.bytes_received.fetch_add(bin.len() as u64, Ordering::Relaxed);
+                                    if let Ok(text) = std::str::from_utf8(&bin) {
+                                        if let Some(event) = parse_jetstream_frame(text) {
+                                            backoff.reset();
+                                            match event {
+                                                JetstreamEvent::Commit(commit) => {
+                                                    let matches_collection = config.wanted_collections.is_empty()
+                                                        || config.wanted_collections.iter().any(|c| c == &commit.collection);
+                                                    let matches_did = config.wanted_dids.is_empty()
+                                                        || config.wanted_dids.iter().any(|d| d == &commit.did);
+                                                    if matches_collection && matches_did {
+                                                        if tx.send(commit).await.is_err() {
+                                                            return Ok(());
+                                                        }
+                                                    } else {
+                                                        cursor.update(commit.time_us);
+                                                    }
+                                                }
+                                                JetstreamEvent::Heartbeat { time_us }
+                                                | JetstreamEvent::Other { time_us, .. } => {
+                                                    cursor.update(time_us);
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                                 Message::Ping(data) => {
                                     let _ = ws_stream.send(Message::Pong(data)).await;

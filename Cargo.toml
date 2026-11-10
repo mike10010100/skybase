@@ -1,6 +1,6 @@
 [package]
 name = "skybase"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2021"
 rust-version = "1.89"
 authors = ["Michael Paulauski <mike10010100@gmail.com>"]
@@ -19,7 +19,7 @@ path = "src/lib.rs"
 
 [dependencies]
 # Identity & OAuth 2.1 Engine
-skyauth = { path = "../skyauth", version = "0.3.12" }
+skyauth = { path = "../skyauth", version = "0.3.13" }
 
 # Concurrency & Async Runtime
 tokio = { version = "1.40", default-features = false, features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
@@ -44,7 +44,7 @@ thiserror = "2.0"
 tracing = "0.1"
 
 # Embedded SQLite Engine (optional via `storage` feature, enabled by default)
-rusqlite = { version = "0.39", optional = true, features = ["bundled", "bundled-windows", "serde_json"] }
+rusqlite = { version = "0.41", optional = true, features = ["bundled", "bundled-windows", "serde_json"] }
 
 # WebSocket & Stream Ingestion
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }

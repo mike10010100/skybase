@@ -184,10 +184,8 @@ impl<'a> QueryBuilder<'a> {
 
         if let Some(ref did) = self.did {
             let trimmed_did = did.trim();
-            if !trimmed_did.is_empty() {
-                sql.push_str(" AND did = ?");
-                params.push(rusqlite::types::Value::Text(trimmed_did.to_string()));
-            }
+            sql.push_str(" AND did = ?");
+            params.push(rusqlite::types::Value::Text(trimmed_did.to_string()));
         }
 
         for clause in &self.where_json_clauses {

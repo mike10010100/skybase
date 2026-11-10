@@ -75,6 +75,7 @@ pub struct RecordView {
     /// Canonical AT-URI of the record.
     pub uri: String,
     /// Content identifier (CID) of the record.
+    #[serde(default)]
     pub cid: String,
     /// The record data payload as a JSON value.
     pub value: serde_json::Value,
@@ -136,6 +137,9 @@ pub fn split_at_uri(uri: &str) -> Option<(&str, &str, &str)> {
     let authority = parts.next()?;
     let collection = parts.next()?;
     let rkey = parts.next()?;
+    if parts.next().is_some() || authority.is_empty() || collection.is_empty() || rkey.is_empty() {
+        return None;
+    }
     Some((authority, collection, rkey))
 }
 
@@ -164,11 +168,11 @@ pub fn extract_did_for_collection<'a>(uri: &'a str, expected_collection: &str) -
     Some(did)
 }
 
-/// Parses an AT-URI (`at://{author}/{collection}/{rkey}`) into `(author, rkey)`.
+/// Parses an AT-URI (`at://{author}/app.bsky.feed.post/{rkey}`) into `(author, rkey)`.
 #[must_use]
 pub fn parse_at_post_uri(uri: &str) -> Option<(&str, &str)> {
-    let (author, _collection, rkey) = split_at_uri(uri)?;
-    if author.is_empty() || rkey.is_empty() {
+    let (author, collection, rkey) = split_at_uri(uri)?;
+    if author.is_empty() || collection != "app.bsky.feed.post" || rkey.is_empty() {
         return None;
     }
     Some((author, rkey))

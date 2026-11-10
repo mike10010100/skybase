@@ -354,8 +354,7 @@ impl RecordStore {
         }
 
         let mut stats = BatchStats::default();
-        let mut upserts_to_notify = Vec::new();
-        let mut deletes_to_notify = Vec::new();
+        let mut notifications = Vec::new();
 
         {
             let mut conn = self.inner.conn.lock();
@@ -382,6 +381,12 @@ impl RecordStore {
                          indexed_at = ?2
                      WHERE uri = ?1 AND ?2 >= indexed_at AND is_deleted = 0
                      RETURNING did, collection, rkey;",
+                )?;
+
+                let mut advance_tombstone_stmt = tx.prepare_cached(
+                    "UPDATE records
+                     SET indexed_at = ?2
+                     WHERE uri = ?1 AND ?2 > indexed_at AND is_deleted = 1;",
                 )?;
 
                 for op in operations {
@@ -416,7 +421,7 @@ impl RecordStore {
 
                             if rows_affected > 0 {
                                 stats.upserted += 1;
-                                upserts_to_notify.push(RecordRow {
+                                notifications.push(ChangeNotification::Upsert(RecordRow {
                                     uri: input.uri.clone(),
                                     cid: input.cid.clone(),
                                     did: input.did.clone(),
@@ -425,7 +430,7 @@ impl RecordStore {
                                     record_json: input.record_json.clone(),
                                     indexed_at: input.indexed_at,
                                     is_deleted: false,
-                                });
+                                }));
                             }
                         }
                         StoreOperation::Delete { uri, indexed_at } => {
@@ -445,7 +450,16 @@ impl RecordStore {
                                 let did: String = row.get(0)?;
                                 let collection: String = row.get(1)?;
                                 let rkey: String = row.get(2)?;
-                                deletes_to_notify.push((uri.clone(), did, collection, rkey));
+                                notifications.push(ChangeNotification::Delete {
+                                    uri: uri.clone(),
+                                    did,
+                                    collection,
+                                    rkey,
+                                });
+                            } else {
+                                drop(rows);
+                                let _ = advance_tombstone_stmt
+                                    .execute(rusqlite::params![uri, indexed_at_i64])?;
                             }
                         }
                     }
@@ -454,7 +468,8 @@ impl RecordStore {
                 if let Some(cur) = cursor {
                     let mut meta_stmt = tx.prepare_cached(
                         "INSERT INTO _skybase_meta (key, value) VALUES ('cursor', ?1)
-                         ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
+                         ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                         WHERE CAST(excluded.value AS INTEGER) >= CAST(_skybase_meta.value AS INTEGER);",
                     )?;
                     meta_stmt.execute(rusqlite::params![cur.to_string()])?;
                 }
@@ -463,11 +478,20 @@ impl RecordStore {
             tx.commit()?;
         }
 
-        for row in upserts_to_notify {
-            self.inner.bus.publish_upsert(row);
-        }
-        for (uri, did, collection, rkey) in deletes_to_notify {
-            self.inner.bus.publish_delete(uri, did, collection, rkey);
+        for notification in notifications {
+            match notification {
+                ChangeNotification::Upsert(row) => {
+                    self.inner.bus.publish_upsert(row);
+                }
+                ChangeNotification::Delete {
+                    uri,
+                    did,
+                    collection,
+                    rkey,
+                } => {
+                    self.inner.bus.publish_delete(uri, did, collection, rkey);
+                }
+            }
         }
 
         Ok(stats)
@@ -547,6 +571,14 @@ impl RecordStore {
                 let rkey: String = row.get(2)?;
                 Some((did, collection, rkey))
             } else {
+                drop(rows);
+                drop(stmt);
+                let mut advance_stmt = conn.prepare_cached(
+                    "UPDATE records
+                     SET indexed_at = ?2
+                     WHERE uri = ?1 AND ?2 > indexed_at AND is_deleted = 1;",
+                )?;
+                let _ = advance_stmt.execute(rusqlite::params![uri, indexed_at_i64])?;
                 None
             }
         };
@@ -644,12 +676,21 @@ impl RecordStore {
         }
     }
 
-    /// Persists the Jetstream sequence cursor to SQLite.
+    /// Persists the Jetstream sequence cursor to SQLite monotonically.
+    ///
+    /// If a larger cursor is already stored, this call is a no-op.
     ///
     /// # Errors
     /// Returns [`SkybaseError::Storage`] on database error.
     pub fn set_cursor(&self, cursor: u64) -> Result<()> {
-        self.set_meta("cursor", &cursor.to_string())
+        let conn = self.inner.conn.lock();
+        let mut stmt = conn.prepare_cached(
+            "INSERT INTO _skybase_meta (key, value) VALUES ('cursor', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value
+             WHERE CAST(excluded.value AS INTEGER) >= CAST(_skybase_meta.value AS INTEGER);",
+        )?;
+        stmt.execute(rusqlite::params![cursor.to_string()])?;
+        Ok(())
     }
 
     /// Retrieves an active (non-deleted) record by its canonical URI.
