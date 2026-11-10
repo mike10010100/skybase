@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.10] - 2026-11-10
+
+### Changed
+
+- **Upgraded `skyauth` to `0.3.13` & `rusqlite` to `0.41`** (`Cargo.toml`):
+  - Incorporates `skyauth 0.3.13` formal Verus/rustc clock-skew leeway kernel (`is_access_jwt_exp_valid`), required `iss`/`exp`/`aud` service-auth claims, strict `did:plc`/`did:web` syntax checks, and IPv6 literal SSRF validation.
+  - Upgraded `rusqlite` from `0.40` to `0.41` (`libsqlite3-sys 0.37.0`) to resolve `RUSTSEC-2026-0459`.
+
+### Fixed
+
+- **Transactional Store & Query Invariants** (`src/index/store.rs`, `src/index/query.rs`):
+  - Deferred `NotificationBus::notify` emissions until after the SQLite transaction commits in `IndexStore::apply_event` so subscribers never observe uncommitted state.
+  - Guarded `indexed_at` advancement in `delete_record_tx` so stale out-of-order delete events do not overwrite newer tombstones.
+  - Made `save_cursor` monotonic (`MAX(excluded.time_us, sync_cursors.time_us)`) across both `apply_event` and explicit checkpoints.
+  - Preserved empty `.did("")` equality predicates in `RecordQuery` instead of dropping the `WHERE did = ?` clause.
+- **Jetstream Consumer & Streamer Resilience** (`src/ingest/consumer.rs`, `src/ingest/streamer.rs`):
+  - Handled UTF-8 JSON payloads delivered in WebSocket `Message::Binary` frames in `JetstreamConsumer::run_session` for parity with `run_jetstream_streamer`.
+  - Wrapped `connect_async` in `tokio::select!` with `cancel.cancelled()` and guarded zero `ping_interval` in `run_jetstream_streamer`.
+- **PDS Repo, Chat & AppView Client Hardening** (`src/repo/client.rs`, `src/repo/types.rs`, `src/chat/client.rs`, `src/appview.rs`, `src/lexicon/records.rs`):
+  - Failed closed when a `401 use_dpop_nonce` challenge omits the `DPoP-Nonce` header in `PdsRepoClient`.
+  - Added `#[serde(default)]` on `RecordView::cid` and tightened `split_at_uri` / `parse_at_post_uri` to reject trailing empty path segments and non-post collections.
+  - Fixed `ChatClient::refresh_session_or_relogin` to fall back to `create_session` when no `refresh_jwt` is cached, and URL-encoded query parameters via `reqwest::RequestBuilder::query`.
+  - Added `#[serde(rename_all = "camelCase")]` to `ActorProfile`, guarded against repeating pagination cursors in `AppViewClient::list_all_records`, and unified `SelfLabels::has_nsfw` with `Embed::extract_signals` via `NSFW_SELF_LABEL_VALUES`.
+
 ## [0.1.9] - 2026-11-03
 
 ### Changed

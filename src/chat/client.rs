@@ -220,11 +220,13 @@ impl ChatClient {
             .map_err(|e| SkybaseError::Chat(format!("Failed to build refresh HTTP client: {e}")))?;
 
         // Strategy 1: Attempt refreshSession via refreshJwt if available
-        if let (Some(ref refresh_jwt), Some(ref creds)) = (&state.refresh_jwt, &state.credentials) {
-            let refresh_url = format!(
-                "{}/xrpc/com.atproto.server.refreshSession",
-                creds.pds_endpoint.trim_end_matches('/')
-            );
+        if let Some(ref refresh_jwt) = state.refresh_jwt {
+            let refresh_base = state
+                .credentials
+                .as_ref()
+                .map_or(self.base_url.as_str(), |c| c.pds_endpoint.as_str())
+                .trim_end_matches('/');
+            let refresh_url = format!("{refresh_base}/xrpc/com.atproto.server.refreshSession");
             match http
                 .post(&refresh_url)
                 .header(AUTHORIZATION, format!("Bearer {refresh_jwt}"))
@@ -413,7 +415,8 @@ impl ChatClient {
             query_params.push(format!("limit={limit}"));
         }
         if let Some(cursor) = cursor {
-            query_params.push(format!("cursor={cursor}"));
+            let encoded: String = url::form_urlencoded::byte_serialize(cursor.as_bytes()).collect();
+            query_params.push(format!("cursor={encoded}"));
         }
         if !query_params.is_empty() {
             url.push('?');
@@ -449,7 +452,8 @@ impl ChatClient {
             query_params.push(format!("limit={limit}"));
         }
         if let Some(cursor) = cursor {
-            query_params.push(format!("cursor={cursor}"));
+            let encoded: String = url::form_urlencoded::byte_serialize(cursor.as_bytes()).collect();
+            query_params.push(format!("cursor={encoded}"));
         }
         if !query_params.is_empty() {
             url.push('?');
@@ -508,15 +512,19 @@ impl ChatClient {
         limit: Option<usize>,
         cursor: Option<&str>,
     ) -> Result<GetMessagesResponse, SkybaseError> {
+        let encoded_convo_id: String =
+            url::form_urlencoded::byte_serialize(convo_id.as_bytes()).collect();
         let mut url = format!(
-            "{}/xrpc/chat.bsky.convo.getMessages?convoId={convo_id}",
+            "{}/xrpc/chat.bsky.convo.getMessages?convoId={encoded_convo_id}",
             self.base_url
         );
         if let Some(limit) = limit {
             url.push_str(&format!("&limit={limit}"));
         }
         if let Some(cursor) = cursor {
-            url.push_str(&format!("&cursor={cursor}"));
+            let encoded_cursor: String =
+                url::form_urlencoded::byte_serialize(cursor.as_bytes()).collect();
+            url.push_str(&format!("&cursor={encoded_cursor}"));
         }
 
         let resp = self
@@ -591,7 +599,13 @@ impl ChatClient {
     /// Returns [`SkybaseError`] if the HTTP request or JSON deserialization fails.
     pub async fn get_convo_for_members(&self, members: &[&str]) -> Result<ConvoView, SkybaseError> {
         let mut url = format!("{}/xrpc/chat.bsky.convo.getConvoForMembers?", self.base_url);
-        let params: Vec<String> = members.iter().map(|m| format!("members={m}")).collect();
+        let params: Vec<String> = members
+            .iter()
+            .map(|m| {
+                let encoded: String = url::form_urlencoded::byte_serialize(m.as_bytes()).collect();
+                format!("members={encoded}")
+            })
+            .collect();
         url.push_str(&params.join("&"));
 
         let resp = self

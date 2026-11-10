@@ -278,7 +278,7 @@ impl Embed {
 ///
 /// Mirrors the content-warning vocabulary used by `ATProto` clients for
 /// `com.atproto.label.defs#selfLabels` (e.g. `porn`, `sexual`, `nudity`).
-pub const NSFW_SELF_LABEL_VALUES: [&str; 8] = [
+pub const NSFW_SELF_LABEL_VALUES: [&str; 10] = [
     "porn",
     "sexual",
     "nudity",
@@ -287,6 +287,8 @@ pub const NSFW_SELF_LABEL_VALUES: [&str; 8] = [
     "adult",
     "nsfw",
     "suggestive",
+    "gore",
+    "corpse",
 ];
 
 /// Returns `true` if a post record carries an adult / NSFW author self-label.
@@ -355,6 +357,8 @@ impl SelfLabels {
         "nudity",
         "nsfw",
         "graphic-media",
+        "graphic",
+        "suggestive",
         "gore",
         "corpse",
         "adult",

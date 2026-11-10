@@ -558,9 +558,8 @@ impl PdsRepoClient {
                         ));
                     }
 
-                    // Verify we have a fresh nonce for the retry
-                    let fresh_nonce = self.nonce_cache.get_nonce(&server_origin);
-                    if fresh_nonce.is_none() {
+                    // Verify the challenge response carried a fresh nonce for the retry
+                    if new_nonce.is_none() {
                         return Err(SkybaseError::Repo(
                             "PDS issued use_dpop_nonce challenge but omitted DPoP-Nonce header"
                                 .into(),
