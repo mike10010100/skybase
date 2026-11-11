@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.11] - 2026-11-11
+
+### Added
+
+- **`ChatClient::base_url` Accessor** (`src/chat/client.rs`): Added `ChatClient::base_url(&self)` returning the active XRPC base URL for chat calls.
+
+### Fixed
+
+- **Authoritative PDS Proxy Discovery for App-Password Chat Sessions** (`src/chat/client.rs`, `tests/chat_tests.rs`):
+  - `ChatClient::login_with_app_password` now extracts the account's authoritative `#atproto_pds` (`AtprotoPersonalDataServer`) `serviceEndpoint` from `createSession`'s `didDoc` when `chat_endpoint` is `api.bsky.chat` or the `bsky.social` entryway, routing `chat.bsky.convo.*` XRPC requests through the PDS with `atproto-proxy: did:web:api.bsky.chat#bsky_chat` instead of presenting PDS `at+jwt` tokens directly to `api.bsky.chat` (`401 BadJwtType`).
+  - Automatically updates the active PDS `base_url` if `didDoc` migrates to a new PDS shard during `refreshSession` or App-Password re-login.
+  - Prevented infinite `refreshSession` storms in `ChatClient::send_request` when an endpoint returns permanent token-type or scope rejections (`BadJwtType`, `BadTokenScope`).
+
 ## [0.1.10] - 2026-11-10
 
 ### Changed

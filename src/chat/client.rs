@@ -33,6 +33,8 @@ struct CreateSessionResponse {
     access_jwt: String,
     #[serde(rename = "refreshJwt", default)]
     refresh_jwt: Option<String>,
+    #[serde(rename = "didDoc", default)]
+    did_doc: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -41,6 +43,8 @@ struct RefreshSessionResponse {
     access_jwt: String,
     #[serde(rename = "refreshJwt", default)]
     refresh_jwt: Option<String>,
+    #[serde(rename = "didDoc", default)]
+    did_doc: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -52,15 +56,136 @@ struct BotCredentials {
 
 #[derive(Debug, Clone)]
 struct AuthState {
+    base_url: String,
+    allow_dynamic_pds_updates: bool,
     access_jwt: String,
     refresh_jwt: Option<String>,
     credentials: Option<BotCredentials>,
 }
 
+/// Returns `true` when `url_str` points directly at the Bluesky chat backend (`api.bsky.chat`)
+/// rather than a Personal Data Server gateway.
+fn is_direct_chat_endpoint(url_str: &str) -> bool {
+    url::Url::parse(url_str).map_or_else(
+        |_| url_str.contains("api.bsky.chat"),
+        |u| {
+            u.host_str()
+                .is_some_and(|h| h.eq_ignore_ascii_case("api.bsky.chat"))
+        },
+    )
+}
+
+/// Returns `true` when `url_str` points at the public Bluesky entryway (`bsky.social`),
+/// which authenticates sessions (`createSession` / `refreshSession`) but does not proxy
+/// `chat.bsky.convo.*` XRPC calls.
+fn is_bsky_entryway(url_str: &str) -> bool {
+    url::Url::parse(url_str)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.eq_ignore_ascii_case("bsky.social")))
+        .unwrap_or(false)
+}
+
+/// Extracts a validated `#atproto_pds` (`AtprotoPersonalDataServer`) endpoint URL from an
+/// untrusted `didDoc` JSON payload returned by `createSession` or `refreshSession`.
+fn extract_pds_endpoint_from_did_doc(did_doc: &serde_json::Value) -> Option<String> {
+    if let Ok(parsed_doc) =
+        serde_json::from_value::<skyauth::identity::DidDocument>(did_doc.clone())
+    {
+        if let Ok(endpoint) = parsed_doc.extract_pds_endpoint() {
+            return Some(endpoint);
+        }
+    }
+
+    let services = did_doc.get("service")?.as_array()?;
+    for svc in services {
+        let id = svc
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let svc_type = svc
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let is_pds = (id == "#atproto_pds" || id.ends_with("#atproto_pds"))
+            && (svc_type.is_empty() || svc_type == "AtprotoPersonalDataServer");
+        if !is_pds {
+            continue;
+        }
+        let Some(raw_endpoint) = svc
+            .get("serviceEndpoint")
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        let trimmed = raw_endpoint.trim().trim_end_matches('/');
+        if let Ok(parsed) = url::Url::parse(trimmed) {
+            if (parsed.scheme() == "https" || parsed.scheme() == "http")
+                && parsed.host_str().is_some()
+            {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Resolves the XRPC base URL to use for an App-Password (`at+jwt`) chat session.
+///
+/// PDS user session tokens (`typ: "at+jwt"`) cannot be presented directly to
+/// `https://api.bsky.chat` (`401 BadJwtType`) and cannot be proxied through the
+/// `https://bsky.social` entryway (`501 MethodNotImplemented`); they must be routed through
+/// the account's authoritative PDS (`#atproto_pds` in `didDoc`) with the
+/// `atproto-proxy: did:web:api.bsky.chat#bsky_chat` header.
+///
+/// Returns `(resolved_base_url, allow_dynamic_pds_updates)`.
+fn resolve_session_chat_base_url(
+    pds_endpoint: &str,
+    chat_endpoint: &str,
+    did_doc: Option<&serde_json::Value>,
+) -> (String, bool) {
+    let pds_trimmed = pds_endpoint.trim().trim_end_matches('/');
+    let chat_trimmed = chat_endpoint.trim().trim_end_matches('/');
+
+    let has_custom_chat_override = !chat_trimmed.is_empty()
+        && !is_direct_chat_endpoint(chat_trimmed)
+        && !is_bsky_entryway(chat_trimmed)
+        && chat_trimmed != pds_trimmed;
+
+    if has_custom_chat_override {
+        return (chat_trimmed.to_string(), false);
+    }
+
+    if let Some(discovered_pds) = did_doc.and_then(extract_pds_endpoint_from_did_doc) {
+        return (discovered_pds, true);
+    }
+
+    if (chat_trimmed.is_empty() || is_direct_chat_endpoint(chat_trimmed))
+        && !pds_trimmed.is_empty()
+        && !is_bsky_entryway(pds_trimmed)
+    {
+        return (pds_trimmed.to_string(), true);
+    }
+
+    if !chat_trimmed.is_empty() {
+        (chat_trimmed.to_string(), true)
+    } else {
+        (pds_trimmed.to_string(), true)
+    }
+}
+
+/// Returns `true` when an XRPC failure represents a recoverable expired/unauthorized session
+/// token rather than a permanent token-type or scope mismatch (`BadJwtType`, `BadTokenScope`).
+fn is_recoverable_session_expiry(status: reqwest::StatusCode, body_text: &str) -> bool {
+    if body_text.contains("BadJwtType") || body_text.contains("BadTokenScope") {
+        return false;
+    }
+    status == reqwest::StatusCode::UNAUTHORIZED
+        || (status == reqwest::StatusCode::BAD_REQUEST && body_text.contains("ExpiredToken"))
+}
+
 /// Asynchronous HTTP client for interacting with the ATProto Chat service.
 #[derive(Clone)]
 pub struct ChatClient {
-    base_url: String,
     client: reqwest::Client,
     auth_state: Arc<RwLock<AuthState>>,
 }
@@ -71,24 +196,30 @@ impl ChatClient {
     /// If `base_url` is a PDS rather than `api.bsky.chat`, the required `atproto-proxy`
     /// header is automatically attached to route chat XRPC requests through the gateway.
     ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use skybase::chat::ChatClient;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = ChatClient::new("https://pds.example.com/", "at-jwt-token")?;
+    /// assert_eq!(client.base_url().await, "https://pds.example.com");
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
     /// # Errors
     /// Returns [`SkybaseError::Chat`] if HTTP client configuration or headers fail.
     pub fn new(
         base_url: impl Into<String>,
         access_token: impl Into<String>,
     ) -> Result<Self, SkybaseError> {
-        let base_url = base_url.into().trim_end_matches('/').to_string();
+        let base_url = base_url.into().trim().trim_end_matches('/').to_string();
         let token = access_token.into();
 
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-
-        if !base_url.contains("api.bsky.chat") {
-            headers.insert(
-                HeaderName::from_static("atproto-proxy"),
-                HeaderValue::from_static(ATPROTO_CHAT_PROXY_DID),
-            );
-        }
 
         let client = reqwest::Client::builder()
             .default_headers(headers)
@@ -97,16 +228,14 @@ impl ChatClient {
             .map_err(|e| SkybaseError::Chat(format!("Failed to build chat HTTP client: {e}")))?;
 
         let auth_state = Arc::new(RwLock::new(AuthState {
+            base_url,
+            allow_dynamic_pds_updates: true,
             access_jwt: token,
             refresh_jwt: None,
             credentials: None,
         }));
 
-        Ok(Self {
-            base_url,
-            client,
-            auth_state,
-        })
+        Ok(Self { client, auth_state })
     }
 
     /// Attaches a refresh JWT token for automatic session refresh upon token expiry.
@@ -144,9 +273,37 @@ impl ChatClient {
         self.auth_state.read().await.access_jwt.clone()
     }
 
+    /// Returns the active XRPC base URL used for chat requests (either the account's
+    /// authoritative PDS gateway or an explicit chat service endpoint).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use skybase::chat::ChatClient;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = ChatClient::new("https://chalciporus.us-west.host.bsky.network/", "tok")?;
+    /// assert_eq!(
+    ///     client.base_url().await,
+    ///     "https://chalciporus.us-west.host.bsky.network"
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn base_url(&self) -> String {
+        self.auth_state.read().await.base_url.clone()
+    }
+
     /// Authenticates with an ATProto account identifier and App Password via `com.atproto.server.createSession`.
     ///
-    /// Returns a configured [`ChatClient`] proxied through the PDS and the resolved account DID.
+    /// Automatically extracts the account's authoritative `#atproto_pds` service endpoint from
+    /// `didDoc` when `chat_endpoint` is the default chat backend (`<https://api.bsky.chat>`) or
+    /// the Bluesky entryway (`<https://bsky.social>`), routing chat XRPC calls through the PDS
+    /// with `atproto-proxy: did:web:api.bsky.chat#bsky_chat` so `at+jwt` user session tokens are
+    /// exchanged for inter-service JWTs by the PDS.
+    ///
+    /// Returns a configured [`ChatClient`] and the resolved account DID.
     /// The client retains credentials and refresh token to automatically recover from session expiry.
     ///
     /// # Errors
@@ -157,7 +314,7 @@ impl ChatClient {
         identifier: &str,
         password: &str,
     ) -> Result<(Self, String), SkybaseError> {
-        let pds_url = pds_endpoint.trim_end_matches('/');
+        let pds_url = pds_endpoint.trim().trim_end_matches('/');
         let login_url = format!("{pds_url}/xrpc/com.atproto.server.createSession");
 
         let http = reqwest::Client::builder()
@@ -188,7 +345,18 @@ impl ChatClient {
             SkybaseError::Chat(format!("Failed to parse createSession response: {e}"))
         })?;
 
-        let mut chat_client = Self::new(chat_endpoint, &session.access_jwt)?;
+        let (resolved_base_url, allow_dynamic_pds_updates) =
+            resolve_session_chat_base_url(pds_url, chat_endpoint, session.did_doc.as_ref());
+        debug!(
+            did = %session.did,
+            chat_base_url = %resolved_base_url,
+            "Resolved ATProto chat XRPC base URL for App Password session"
+        );
+
+        let mut chat_client = Self::new(&resolved_base_url, &session.access_jwt)?;
+        if let Ok(mut state) = chat_client.auth_state.try_write() {
+            state.allow_dynamic_pds_updates = allow_dynamic_pds_updates;
+        }
         if let Some(ref refresh) = session.refresh_jwt {
             chat_client = chat_client.with_refresh_token(refresh);
         }
@@ -224,7 +392,7 @@ impl ChatClient {
             let refresh_base = state
                 .credentials
                 .as_ref()
-                .map_or(self.base_url.as_str(), |c| c.pds_endpoint.as_str())
+                .map_or(state.base_url.as_str(), |c| c.pds_endpoint.as_str())
                 .trim_end_matches('/');
             let refresh_url = format!("{refresh_base}/xrpc/com.atproto.server.refreshSession");
             match http
@@ -241,6 +409,15 @@ impl ChatClient {
                             if let Some(new_refresh) = refreshed.refresh_jwt {
                                 if !new_refresh.trim().is_empty() {
                                     state.refresh_jwt = Some(new_refresh);
+                                }
+                            }
+                            if state.allow_dynamic_pds_updates {
+                                if let Some(new_pds) = refreshed
+                                    .did_doc
+                                    .as_ref()
+                                    .and_then(extract_pds_endpoint_from_did_doc)
+                                {
+                                    state.base_url = new_pds;
                                 }
                             }
                             return Ok(());
@@ -311,6 +488,15 @@ impl ChatClient {
                     state.refresh_jwt = Some(new_refresh);
                 }
             }
+            if state.allow_dynamic_pds_updates {
+                if let Some(new_pds) = session
+                    .did_doc
+                    .as_ref()
+                    .and_then(extract_pds_endpoint_from_did_doc)
+                {
+                    state.base_url = new_pds;
+                }
+            }
             return Ok(());
         }
 
@@ -325,11 +511,20 @@ impl ChatClient {
         &self,
         op_name: &str,
         method: reqwest::Method,
-        url: &str,
+        xrpc_path: &str,
         body: Option<serde_json::Value>,
     ) -> Result<reqwest::Response, SkybaseError> {
-        let current_token = self.auth_state.read().await.access_jwt.clone();
-        let req = self.build_request(method.clone(), url, &current_token, body.as_ref());
+        let (current_token, current_base_url) = {
+            let state = self.auth_state.read().await;
+            (state.access_jwt.clone(), state.base_url.clone())
+        };
+        let req = self.build_request(
+            method.clone(),
+            &current_base_url,
+            xrpc_path,
+            &current_token,
+            body.as_ref(),
+        );
 
         let resp = req
             .send()
@@ -342,10 +537,7 @@ impl ChatClient {
         }
 
         let body_text = resp.text().await.unwrap_or_default();
-        let is_token_expired = status == reqwest::StatusCode::UNAUTHORIZED
-            || (status == reqwest::StatusCode::BAD_REQUEST && body_text.contains("ExpiredToken"));
-
-        if is_token_expired && self.can_refresh().await {
+        if is_recoverable_session_expiry(status, &body_text) && self.can_refresh().await {
             warn!(
                 op = op_name,
                 status = %status,
@@ -358,8 +550,12 @@ impl ChatClient {
                 )));
             }
 
-            let new_token = self.auth_state.read().await.access_jwt.clone();
-            let retry_req = self.build_request(method, url, &new_token, body.as_ref());
+            let (new_token, new_base_url) = {
+                let state = self.auth_state.read().await;
+                (state.access_jwt.clone(), state.base_url.clone())
+            };
+            let retry_req =
+                self.build_request(method, &new_base_url, xrpc_path, &new_token, body.as_ref());
 
             let retry_resp = retry_req
                 .send()
@@ -381,18 +577,27 @@ impl ChatClient {
         )))
     }
 
-    /// Builds a bearer-authenticated XRPC request, optionally attaching a JSON body.
+    /// Builds a bearer-authenticated XRPC request, attaching `atproto-proxy` when targeting
+    /// a PDS gateway rather than `api.bsky.chat` directly.
     fn build_request(
         &self,
         method: reqwest::Method,
-        url: &str,
+        base_url: &str,
+        xrpc_path: &str,
         token: &str,
         body: Option<&serde_json::Value>,
     ) -> reqwest::RequestBuilder {
+        let url = format!("{base_url}{xrpc_path}");
         let mut req = self
             .client
-            .request(method, url)
+            .request(method, &url)
             .header(AUTHORIZATION, format!("Bearer {token}"));
+        if !is_direct_chat_endpoint(base_url) {
+            req = req.header(
+                HeaderName::from_static("atproto-proxy"),
+                HeaderValue::from_static(ATPROTO_CHAT_PROXY_DID),
+            );
+        }
         if let Some(b) = body {
             req = req.json(b);
         }
@@ -408,7 +613,7 @@ impl ChatClient {
         limit: Option<usize>,
         cursor: Option<&str>,
     ) -> Result<ListConvosResponse, SkybaseError> {
-        let mut url = format!("{}/xrpc/chat.bsky.convo.listConvos", self.base_url);
+        let mut xrpc_path = "/xrpc/chat.bsky.convo.listConvos".to_string();
         let mut query_params = Vec::new();
 
         if let Some(limit) = limit {
@@ -419,12 +624,12 @@ impl ChatClient {
             query_params.push(format!("cursor={encoded}"));
         }
         if !query_params.is_empty() {
-            url.push('?');
-            url.push_str(&query_params.join("&"));
+            xrpc_path.push('?');
+            xrpc_path.push_str(&query_params.join("&"));
         }
 
         let resp = self
-            .send_request("listConvos", reqwest::Method::GET, &url, None)
+            .send_request("listConvos", reqwest::Method::GET, &xrpc_path, None)
             .await?;
         let result = resp
             .json::<ListConvosResponse>()
@@ -445,7 +650,7 @@ impl ChatClient {
         limit: Option<usize>,
         cursor: Option<&str>,
     ) -> Result<ListConvoRequestsResponse, SkybaseError> {
-        let mut url = format!("{}/xrpc/chat.bsky.convo.listConvoRequests", self.base_url);
+        let mut xrpc_path = "/xrpc/chat.bsky.convo.listConvoRequests".to_string();
         let mut query_params = Vec::new();
 
         if let Some(limit) = limit {
@@ -456,12 +661,12 @@ impl ChatClient {
             query_params.push(format!("cursor={encoded}"));
         }
         if !query_params.is_empty() {
-            url.push('?');
-            url.push_str(&query_params.join("&"));
+            xrpc_path.push('?');
+            xrpc_path.push_str(&query_params.join("&"));
         }
 
         let resp = self
-            .send_request("listConvoRequests", reqwest::Method::GET, &url, None)
+            .send_request("listConvoRequests", reqwest::Method::GET, &xrpc_path, None)
             .await?;
         let result = resp
             .json::<ListConvoRequestsResponse>()
@@ -481,7 +686,7 @@ impl ChatClient {
     /// # Errors
     /// Returns [`SkybaseError`] if the HTTP request or JSON deserialization fails.
     pub async fn accept_convo(&self, convo_id: &str) -> Result<AcceptConvoResponse, SkybaseError> {
-        let url = format!("{}/xrpc/chat.bsky.convo.acceptConvo", self.base_url);
+        let xrpc_path = "/xrpc/chat.bsky.convo.acceptConvo";
         let req = AcceptConvoRequest {
             convo_id: convo_id.to_string(),
         };
@@ -489,7 +694,7 @@ impl ChatClient {
             .map_err(|e| SkybaseError::Chat(format!("Failed to serialize acceptConvo: {e}")))?;
 
         let resp = self
-            .send_request("acceptConvo", reqwest::Method::POST, &url, Some(body))
+            .send_request("acceptConvo", reqwest::Method::POST, xrpc_path, Some(body))
             .await?;
         let result = resp.json::<AcceptConvoResponse>().await.map_err(|e| {
             SkybaseError::Chat(format!("Failed to parse acceptConvo response: {e}"))
@@ -514,21 +719,18 @@ impl ChatClient {
     ) -> Result<GetMessagesResponse, SkybaseError> {
         let encoded_convo_id: String =
             url::form_urlencoded::byte_serialize(convo_id.as_bytes()).collect();
-        let mut url = format!(
-            "{}/xrpc/chat.bsky.convo.getMessages?convoId={encoded_convo_id}",
-            self.base_url
-        );
+        let mut xrpc_path = format!("/xrpc/chat.bsky.convo.getMessages?convoId={encoded_convo_id}");
         if let Some(limit) = limit {
-            url.push_str(&format!("&limit={limit}"));
+            xrpc_path.push_str(&format!("&limit={limit}"));
         }
         if let Some(cursor) = cursor {
             let encoded_cursor: String =
                 url::form_urlencoded::byte_serialize(cursor.as_bytes()).collect();
-            url.push_str(&format!("&cursor={encoded_cursor}"));
+            xrpc_path.push_str(&format!("&cursor={encoded_cursor}"));
         }
 
         let resp = self
-            .send_request("getMessages", reqwest::Method::GET, &url, None)
+            .send_request("getMessages", reqwest::Method::GET, &xrpc_path, None)
             .await?;
         let result = resp.json::<GetMessagesResponse>().await.map_err(|e| {
             SkybaseError::Chat(format!("Failed to parse getMessages response: {e}"))
@@ -558,7 +760,7 @@ impl ChatClient {
         convo_id: &str,
         payload: SendMessagePayload,
     ) -> Result<MessageView, SkybaseError> {
-        let url = format!("{}/xrpc/chat.bsky.convo.sendMessage", self.base_url);
+        let xrpc_path = "/xrpc/chat.bsky.convo.sendMessage";
         let req = SendMessageRequest {
             convo_id: convo_id.to_string(),
             message: payload,
@@ -567,7 +769,7 @@ impl ChatClient {
             .map_err(|e| SkybaseError::Chat(format!("Failed to serialize sendMessage: {e}")))?;
 
         let resp = self
-            .send_request("sendMessage", reqwest::Method::POST, &url, Some(body))
+            .send_request("sendMessage", reqwest::Method::POST, xrpc_path, Some(body))
             .await?;
         let result = resp.json::<MessageView>().await.map_err(|e| {
             SkybaseError::Chat(format!("Failed to parse sendMessage response: {e}"))
@@ -580,7 +782,7 @@ impl ChatClient {
     /// # Errors
     /// Returns [`SkybaseError`] if the HTTP request fails.
     pub async fn update_read(&self, convo_id: &str, message_id: &str) -> Result<(), SkybaseError> {
-        let url = format!("{}/xrpc/chat.bsky.convo.updateRead", self.base_url);
+        let xrpc_path = "/xrpc/chat.bsky.convo.updateRead";
         let req = UpdateReadRequest {
             convo_id: convo_id.to_string(),
             message_id: message_id.to_string(),
@@ -588,7 +790,7 @@ impl ChatClient {
         let body = serde_json::to_value(&req)
             .map_err(|e| SkybaseError::Chat(format!("Failed to serialize updateRead: {e}")))?;
 
-        self.send_request("updateRead", reqwest::Method::POST, &url, Some(body))
+        self.send_request("updateRead", reqwest::Method::POST, xrpc_path, Some(body))
             .await?;
         Ok(())
     }
@@ -598,7 +800,7 @@ impl ChatClient {
     /// # Errors
     /// Returns [`SkybaseError`] if the HTTP request or JSON deserialization fails.
     pub async fn get_convo_for_members(&self, members: &[&str]) -> Result<ConvoView, SkybaseError> {
-        let mut url = format!("{}/xrpc/chat.bsky.convo.getConvoForMembers?", self.base_url);
+        let mut xrpc_path = "/xrpc/chat.bsky.convo.getConvoForMembers?".to_string();
         let params: Vec<String> = members
             .iter()
             .map(|m| {
@@ -606,10 +808,10 @@ impl ChatClient {
                 format!("members={encoded}")
             })
             .collect();
-        url.push_str(&params.join("&"));
+        xrpc_path.push_str(&params.join("&"));
 
         let resp = self
-            .send_request("getConvoForMembers", reqwest::Method::GET, &url, None)
+            .send_request("getConvoForMembers", reqwest::Method::GET, &xrpc_path, None)
             .await?;
 
         #[derive(Deserialize)]
@@ -815,5 +1017,116 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(client.current_access_token().await, "tok_initial");
+    }
+
+    #[test]
+    fn test_did_doc_pds_extraction_and_base_url_resolution_matrix() {
+        let canonical_doc = serde_json::json!({
+            "id": "did:plc:pl7wa2phjeo4zp4zxmewnsis",
+            "alsoKnownAs": ["at://skybouncer.bsky.social"],
+            "service": [
+                {
+                    "id": "#bsky_notif",
+                    "type": "BskyNotificationService",
+                    "serviceEndpoint": "https://notif.bsky.app"
+                },
+                {
+                    "id": "#atproto_pds",
+                    "type": "AtprotoPersonalDataServer",
+                    "serviceEndpoint": "https://chalciporus.us-west.host.bsky.network/"
+                }
+            ]
+        });
+        assert_eq!(
+            extract_pds_endpoint_from_did_doc(&canonical_doc).as_deref(),
+            Some("https://chalciporus.us-west.host.bsky.network")
+        );
+
+        // Minimal partial didDoc without `id` field (lenient fallback path)
+        let partial_doc = serde_json::json!({
+            "service": [
+                {"id": "#other", "type": "Other", "serviceEndpoint": "https://other.example"},
+                {"id": "#atproto_pds", "serviceEndpoint": "https://pds-shard.example.com/"}
+            ]
+        });
+        assert_eq!(
+            extract_pds_endpoint_from_did_doc(&partial_doc).as_deref(),
+            Some("https://pds-shard.example.com")
+        );
+
+        // Invalid non-HTTP serviceEndpoint schemes are rejected
+        let bad_scheme_doc = serde_json::json!({
+            "service": [
+                {"id": "#atproto_pds", "type": "AtprotoPersonalDataServer", "serviceEndpoint": "ftp://bad.example.com"}
+            ]
+        });
+        assert!(extract_pds_endpoint_from_did_doc(&bad_scheme_doc).is_none());
+
+        // Entryway + DEFAULT_CHAT_ENDPOINT + didDoc -> routes through authoritative PDS shard
+        let (url, dynamic) = resolve_session_chat_base_url(
+            "https://bsky.social",
+            DEFAULT_CHAT_ENDPOINT,
+            Some(&canonical_doc),
+        );
+        assert_eq!(url, "https://chalciporus.us-west.host.bsky.network");
+        assert!(dynamic);
+
+        // Entryway + entryway as chat_endpoint + didDoc -> routes through authoritative PDS shard
+        let (url_entry, dyn_entry) = resolve_session_chat_base_url(
+            "https://bsky.social",
+            "https://bsky.social",
+            Some(&canonical_doc),
+        );
+        assert_eq!(url_entry, "https://chalciporus.us-west.host.bsky.network");
+        assert!(dyn_entry);
+
+        // Self-hosted PDS without didDoc + DEFAULT_CHAT_ENDPOINT -> routes through self-hosted PDS
+        let (url_self, dyn_self) = resolve_session_chat_base_url(
+            "https://pds.alice.example/",
+            DEFAULT_CHAT_ENDPOINT,
+            None,
+        );
+        assert_eq!(url_self, "https://pds.alice.example");
+        assert!(dyn_self);
+
+        // Explicit custom chat proxy override is honored and pinned
+        let (url_custom, dyn_custom) = resolve_session_chat_base_url(
+            "https://bsky.social",
+            "https://custom-chat-gateway.example.com/",
+            Some(&canonical_doc),
+        );
+        assert_eq!(url_custom, "https://custom-chat-gateway.example.com");
+        assert!(!dyn_custom);
+
+        // Entryway without didDoc falls back cleanly without panicking
+        let (url_fallback, _) =
+            resolve_session_chat_base_url("https://bsky.social", DEFAULT_CHAT_ENDPOINT, None);
+        assert_eq!(url_fallback, DEFAULT_CHAT_ENDPOINT);
+        let (url_empty_chat, _) = resolve_session_chat_base_url("https://bsky.social", "", None);
+        assert_eq!(url_empty_chat, "https://bsky.social");
+    }
+
+    #[test]
+    fn test_recoverable_session_expiry_excludes_bad_jwt_type_and_scope() {
+        assert!(is_recoverable_session_expiry(
+            reqwest::StatusCode::UNAUTHORIZED,
+            r#"{"error":"ExpiredToken","message":"Token has expired"}"#
+        ));
+        assert!(is_recoverable_session_expiry(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"error":"ExpiredToken","message":"Token has expired"}"#
+        ));
+        assert!(!is_recoverable_session_expiry(
+            reqwest::StatusCode::UNAUTHORIZED,
+            r#"{"error":"BadJwtType","message":"Invalid jwt type \"at+jwt\""}"#
+        ));
+        assert!(!is_recoverable_session_expiry(
+            reqwest::StatusCode::UNAUTHORIZED,
+            r#"{"error":"BadTokenScope","message":"Missing chat scope"}"#
+        ));
+        assert!(!is_recoverable_session_expiry(
+            reqwest::StatusCode::FORBIDDEN,
+            "Forbidden"
+        ));
     }
 }
