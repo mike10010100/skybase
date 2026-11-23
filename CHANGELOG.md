@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.12] - 2026-11-23
+
+### Changed
+
+- Updated `url` (`2.5.8` -> `2.5.9`) in `Cargo.lock` to resolve `RUSTSEC-2026-0592`.
+
+### Fixed
+
+- **Persistent Idle Read Deadline in `run_jetstream_streamer` (`src/ingest/streamer.rs`)**:
+  - Replaced per-iteration `tokio::time::timeout(active_config.read_timeout, read_half.next())` inside the `tokio::select!` loop with a pinned `read_deadline` timer reset only upon receiving a WebSocket frame (`read_half.next()`), preventing periodic keepalive pings (`DEFAULT_PING_INTERVAL = 15s < DEFAULT_READ_TIMEOUT = 30s`) from resetting the idle timeout on silently stalled sockets.
+  - Bounded `write_half.send(Message::Ping(...))` by `active_config.read_timeout` and configured `MissedTickBehavior::Skip` on `ping_timer`.
+  - Added regression test `test_run_jetstream_streamer_idle_timeout_fires_despite_frequent_pings`.
+
 ## [0.1.11] - 2026-11-11
 
 ### Added

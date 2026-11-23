@@ -285,6 +285,9 @@ pub async fn run_jetstream_streamer(
                     .filter(|d| *d > Duration::ZERO)
                     .unwrap_or(Duration::from_secs(3600));
                 let mut ping_timer = tokio::time::interval_at(Instant::now() + ping_dur, ping_dur);
+                ping_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let read_deadline = tokio::time::sleep(active_config.read_timeout);
+                tokio::pin!(read_deadline);
 
                 loop {
                     tokio::select! {
@@ -294,68 +297,93 @@ pub async fn run_jetstream_streamer(
                             let _ = write_half.send(Message::Close(None)).await;
                             return Ok(());
                         }
-                        _ = ping_timer.tick(), if active_config.ping_interval.is_some_and(|d| d > Duration::ZERO) => {
-                            if let Err(e) = write_half.send(Message::Ping(Vec::new().into())).await {
-                                warn!(error = %e, "Failed to send WebSocket keepalive ping; reconnecting");
-                                break;
-                            }
+                        () = &mut read_deadline => {
+                            warn!(
+                                timeout = ?active_config.read_timeout,
+                                cursor = ?cursor_tracker.get_opt(),
+                                "Jetstream WebSocket read timed out (silent stall); closing and reconnecting"
+                            );
+                            let _ = tokio::time::timeout(
+                                Duration::from_secs(1),
+                                write_half.send(Message::Close(None)),
+                            )
+                            .await;
+                            break;
                         }
-                        msg_res = tokio::time::timeout(active_config.read_timeout, read_half.next()) => {
-                            match msg_res {
-                                Ok(Some(Ok(Message::Text(text)))) => {
-                                    if let Some(evt) = parse_jetstream_frame(&text) {
-                                        cursor_tracker.update(evt.time_us());
-                                        backoff.reset();
-                                        if let JetstreamEvent::Commit(commit) = evt {
-                                            if tx.send(commit).await.is_err() {
-                                                debug!("Commit receiver dropped; stopping streamer");
-                                                return Ok(());
-                                            }
-                                        }
-                                    }
-                                }
-                                Ok(Some(Ok(Message::Binary(bytes)))) => {
-                                    if let Ok(text) = std::str::from_utf8(&bytes) {
-                                        if let Some(evt) = parse_jetstream_frame(text) {
-                                            cursor_tracker.update(evt.time_us());
-                                            backoff.reset();
-                                            if let JetstreamEvent::Commit(commit) = evt {
-                                                if tx.send(commit).await.is_err() {
-                                                    debug!("Commit receiver dropped; stopping streamer");
-                                                    return Ok(());
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                Ok(Some(Ok(Message::Ping(payload)))) => {
-                                    let _ = write_half.send(Message::Pong(payload)).await;
-                                }
-                                Ok(Some(Ok(Message::Pong(_)))) => {}
-                                Ok(Some(Ok(Message::Close(frame)))) => {
-                                    warn!(frame = ?frame, "Jetstream server sent close frame; reconnecting");
-                                    break;
-                                }
-                                Ok(Some(Ok(Message::Frame(_)))) => {}
-                                Ok(Some(Err(e))) => {
-                                    warn!(error = %e, "WebSocket read error; reconnecting");
-                                    break;
-                                }
-                                Ok(None) => {
-                                    warn!("Jetstream stream ended unexpectedly; reconnecting");
+                        _ = ping_timer.tick(), if active_config.ping_interval.is_some_and(|d| d > Duration::ZERO) => {
+                            match tokio::time::timeout(
+                                active_config.read_timeout,
+                                write_half.send(Message::Ping(Vec::new().into())),
+                            )
+                            .await
+                            {
+                                Ok(Ok(())) => {}
+                                Ok(Err(e)) => {
+                                    warn!(error = %e, "Failed to send WebSocket keepalive ping; reconnecting");
                                     break;
                                 }
                                 Err(_elapsed) => {
                                     warn!(
                                         timeout = ?active_config.read_timeout,
-                                        cursor = ?cursor_tracker.get_opt(),
-                                        "Jetstream WebSocket read timed out (silent stall); closing and reconnecting"
+                                        "Timed out sending WebSocket keepalive ping; reconnecting"
                                     );
-                                    let _ = tokio::time::timeout(
-                                        Duration::from_secs(1),
-                                        write_half.send(Message::Close(None)),
-                                    )
-                                    .await;
+                                    break;
+                                }
+                            }
+                        }
+                        msg_opt = read_half.next() => {
+                            match msg_opt {
+                                Some(Ok(msg)) => {
+                                    let mut closed = false;
+                                    match msg {
+                                        Message::Text(text) => {
+                                            if let Some(evt) = parse_jetstream_frame(&text) {
+                                                cursor_tracker.update(evt.time_us());
+                                                backoff.reset();
+                                                if let JetstreamEvent::Commit(commit) = evt {
+                                                    if tx.send(commit).await.is_err() {
+                                                        debug!("Commit receiver dropped; stopping streamer");
+                                                        return Ok(());
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Message::Binary(bytes) => {
+                                            if let Ok(text) = std::str::from_utf8(&bytes) {
+                                                if let Some(evt) = parse_jetstream_frame(text) {
+                                                    cursor_tracker.update(evt.time_us());
+                                                    backoff.reset();
+                                                    if let JetstreamEvent::Commit(commit) = evt {
+                                                        if tx.send(commit).await.is_err() {
+                                                            debug!("Commit receiver dropped; stopping streamer");
+                                                            return Ok(());
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Message::Ping(payload) => {
+                                            let _ = write_half.send(Message::Pong(payload)).await;
+                                        }
+                                        Message::Pong(_) | Message::Frame(_) => {}
+                                        Message::Close(frame) => {
+                                            warn!(frame = ?frame, "Jetstream server sent close frame; reconnecting");
+                                            closed = true;
+                                        }
+                                    }
+                                    if closed {
+                                        break;
+                                    }
+                                    read_deadline
+                                        .as_mut()
+                                        .reset(Instant::now() + active_config.read_timeout);
+                                }
+                                Some(Err(e)) => {
+                                    warn!(error = %e, "WebSocket read error; reconnecting");
+                                    break;
+                                }
+                                None => {
+                                    warn!("Jetstream stream ended unexpectedly; reconnecting");
                                     break;
                                 }
                             }
@@ -598,6 +626,69 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn test_run_jetstream_streamer_idle_timeout_fires_despite_frequent_pings() {
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::accept_async;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server_task = tokio::spawn(async move {
+            // Connection 1: accept WebSocket and stay completely silent (never polling/sending
+            // frames or Pongs) while the client emits keepalive pings every 30ms.
+            let (tcp1, _) = listener.accept().await.unwrap();
+            let _ws1 = accept_async(tcp1).await.unwrap();
+
+            // Connection 2: once read_timeout fires despite pings, deliver a valid commit.
+            if let Ok((tcp2, _)) = listener.accept().await {
+                let mut ws2 = accept_async(tcp2).await.unwrap();
+                let frame = serde_json::json!({
+                    "did": "did:plc:recovered",
+                    "time_us": 1_700_000_050_000_000u64,
+                    "kind": "commit",
+                    "commit": {
+                        "rev": "3k2e",
+                        "operation": "create",
+                        "collection": "app.bsky.feed.post",
+                        "rkey": "r_ping_stall",
+                        "record": {"text": "recovered"},
+                        "cid": "bafy_ping"
+                    }
+                })
+                .to_string();
+                let _ = ws2.send(Message::Text(frame.into())).await;
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        });
+
+        let (tx, mut rx) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        // Ping interval (30ms) is much shorter than read_timeout (160ms), matching prod 15s < 30s.
+        let cfg = StreamConfig::new(format!("ws://{addr}/subscribe"))
+            .with_read_timeout(Duration::from_millis(160))
+            .with_ping_interval(Some(Duration::from_millis(30)));
+
+        let cancel_clone = cancel.clone();
+        let handle = tokio::spawn(async move {
+            run_jetstream_streamer(cfg, tx, cancel_clone).await.unwrap();
+        });
+
+        let commit = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .expect("idle read timeout did not fire despite frequent pings")
+            .unwrap();
+        assert_eq!(commit.did, "did:plc:recovered");
+        assert_eq!(commit.rkey, "r_ping_stall");
+
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap();
         server_task.abort();
     }
 }
