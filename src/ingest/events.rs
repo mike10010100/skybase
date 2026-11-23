@@ -319,10 +319,7 @@ pub(crate) fn is_valid_time_us(time_us: u64) -> bool {
     let now_us = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_micros() as u64);
-    if now_us > 0 && time_us > now_us.saturating_add(MAX_FUTURE_SKEW_US) {
-        return false;
-    }
-    true
+    now_us == 0 || time_us <= now_us.saturating_add(MAX_FUTURE_SKEW_US)
 }
 
 fn is_valid_did(did: &str) -> bool {
