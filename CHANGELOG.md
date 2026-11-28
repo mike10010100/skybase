@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.13] - 2026-11-28
+
+### Added
+
+- **`PdsRepoClient::put_record_with_swap`** (`src/repo/client.rs`): Added optimistic compare-and-swap support (`swapRecord`) to `com.atproto.repo.putRecord`; `put_record` now delegates to `put_record_with_swap(..., None)`.
+- **`PdsRepoClient::list_records`, `ListRecordEntry`, `ListRecordsPage`** (`src/repo/client.rs`, `src/repo/types.rs`, `src/repo/mod.rs`, `src/lib.rs`): Added DPoP-authenticated, SSRF-validated, 1 MiB-bounded pagination for `com.atproto.repo.listRecords` with `limit` clamped to `1..=100` and typed pagination DTOs.
+- **`PdsRepoClient::with_ssrf_filter` & Timeout Constants** (`src/repo/client.rs`): Added `DEFAULT_PDS_CONNECT_TIMEOUT` (5s), `DEFAULT_PDS_REQUEST_TIMEOUT` (15s), and `with_ssrf_filter(SsrfFilter)` (rebuilding the internal pinned `reqwest::Client` without panics).
+- **`From<skyauth::error::SsrfError> for SkybaseError`** (`src/error.rs`): Mapped SSRF validation errors into `SkybaseError::Auth`.
+- **`MAX_APPVIEW_BODY_BYTES` (2 MiB)** (`src/appview.rs`): Exported constant bounding `AppViewClient::get` responses.
+
+### Security & Hardening
+
+- **SSRF & Timeout Hardening on `PdsRepoClient`** (`src/repo/client.rs`): Defaulted `PdsRepoClient` to `SsrfFilter::new(false)`, built its `reqwest::Client` via `SsrfFilter::build_http_client(DEFAULT_PDS_CONNECT_TIMEOUT, DEFAULT_PDS_REQUEST_TIMEOUT)`, and enforced `ssrf_filter.validate_url(&parsed_url)` before every XRPC request attempt inside `send_with_nonce_retry_content_type` (blocking IP literals, cloud metadata endpoints, non-HTTPS schemes, and DNS rebinding).
+- **2 MiB Streaming Body Cap on `AppViewClient::get`** (`src/appview.rs`): Added `Content-Length` pre-check and incremental `bytes_stream()` byte counting capped at `MAX_APPVIEW_BODY_BYTES` (`2 * 1024 * 1024` bytes) to prevent unbounded memory allocation on oversized responses.
+
+### Changed
+
+- Upgraded `skyauth` requirement to `0.3.14` and bumped `tokio` minimum requirement to `1.53.3` in both `[dependencies]` and `[dev-dependencies]` (`Cargo.toml`, `Cargo.lock`).
+
 ## [0.1.12] - 2026-11-23
 
 ### Changed

@@ -25,6 +25,7 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use skyauth::session::OAuthSession;
+use skyauth::SsrfFilter;
 use skybase::error::SkybaseError;
 use skybase::repo::{format_at_uri, generate_tid, validate_rkey, PdsRepoClient, TidGenerator};
 
@@ -54,7 +55,8 @@ async fn test_adv_nonce_double_challenge_infinite_loop_prevention() {
         .await;
 
     let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_123")
-        .expect("client creation failed");
+        .expect("client creation failed")
+        .with_ssrf_filter(SsrfFilter::new(true));
 
     let res = client
         .create_record(
@@ -104,7 +106,8 @@ async fn test_adv_nonce_www_authenticate_double_challenge() {
         .await;
 
     let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_123")
-        .expect("client creation failed");
+        .expect("client creation failed")
+        .with_ssrf_filter(SsrfFilter::new(true));
 
     let res = client
         .create_record(
@@ -154,7 +157,8 @@ async fn test_adv_nonce_400_bad_request_nonce_challenge_success() {
         .await;
 
     let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_123")
-        .expect("client creation failed");
+        .expect("client creation failed")
+        .with_ssrf_filter(SsrfFilter::new(true));
 
     let res = client
         .create_record(
@@ -193,7 +197,8 @@ async fn test_adv_nonce_400_bad_request_double_challenge_fails() {
         .await;
 
     let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_123")
-        .expect("client creation failed");
+        .expect("client creation failed")
+        .with_ssrf_filter(SsrfFilter::new(true));
 
     let res = client
         .create_record(
@@ -233,7 +238,8 @@ async fn test_adv_nonce_missing_header_fails_closed_zero_retry() {
         .await;
 
     let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_123")
-        .expect("client creation failed");
+        .expect("client creation failed")
+        .with_ssrf_filter(SsrfFilter::new(true));
 
     let res = client
         .create_record(
@@ -280,7 +286,8 @@ async fn test_adv_nonce_empty_or_whitespace_header_fails_closed() {
         .await;
 
     let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_123")
-        .expect("client creation failed");
+        .expect("client creation failed")
+        .with_ssrf_filter(SsrfFilter::new(true));
 
     let res = client
         .create_record(
@@ -336,7 +343,8 @@ async fn test_adv_nonce_mixed_case_headers() {
             .await;
 
         let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_123")
-            .expect("client creation failed");
+            .expect("client creation failed")
+            .with_ssrf_filter(SsrfFilter::new(true));
 
         let res = client
             .create_record(
@@ -391,7 +399,8 @@ async fn test_adv_nonce_whitespace_padding_trimmed() {
         .await;
 
     let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_123")
-        .expect("client creation failed");
+        .expect("client creation failed")
+        .with_ssrf_filter(SsrfFilter::new(true));
 
     let res = client
         .create_record(
@@ -442,7 +451,8 @@ async fn test_adv_nonce_delete_record_lifecycle() {
         .await;
 
     let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_123")
-        .expect("client creation failed");
+        .expect("client creation failed")
+        .with_ssrf_filter(SsrfFilter::new(true));
 
     let del_res = client
         .delete_record("app.bsky.feed.post", "post_to_delete")
@@ -473,7 +483,8 @@ async fn test_adv_nonce_delete_record_lifecycle() {
         .await;
 
     let client2 = PdsRepoClient::from_credentials(server2.uri(), "did:plc:alice", "token_123")
-        .expect("client creation failed");
+        .expect("client creation failed")
+        .with_ssrf_filter(SsrfFilter::new(true));
 
     let del_res2 = client2
         .delete_record("app.bsky.feed.post", "post_to_delete")
@@ -507,7 +518,8 @@ async fn test_adv_error_body_giant_10mb_payload_bounded_reader() {
         .await;
 
     let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_123")
-        .expect("client creation failed");
+        .expect("client creation failed")
+        .with_ssrf_filter(SsrfFilter::new(true));
 
     let start = std::time::Instant::now();
     let res = client
@@ -555,7 +567,8 @@ async fn test_adv_error_body_truncated_json() {
         .await;
 
     let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_123")
-        .expect("client creation failed");
+        .expect("client creation failed")
+        .with_ssrf_filter(SsrfFilter::new(true));
 
     let res = client
         .create_record(
@@ -595,7 +608,8 @@ async fn test_adv_error_body_html_error_page() {
         .await;
 
     let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_123")
-        .expect("client creation failed");
+        .expect("client creation failed")
+        .with_ssrf_filter(SsrfFilter::new(true));
 
     let res = client
         .create_record(
@@ -631,7 +645,8 @@ async fn test_adv_error_body_binary_null_bytes() {
         .await;
 
     let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_123")
-        .expect("client creation failed");
+        .expect("client creation failed")
+        .with_ssrf_filter(SsrfFilter::new(true));
 
     let res = client
         .create_record(
@@ -661,7 +676,8 @@ async fn test_adv_error_body_empty() {
         .await;
 
     let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_123")
-        .expect("client creation failed");
+        .expect("client creation failed")
+        .with_ssrf_filter(SsrfFilter::new(true));
 
     let res = client
         .create_record(
@@ -700,7 +716,8 @@ async fn test_adv_error_body_json_type_confusion() {
             .await;
 
         let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_123")
-            .expect("client creation failed");
+            .expect("client creation failed")
+            .with_ssrf_filter(SsrfFilter::new(true));
 
         let res = client
             .create_record(
@@ -735,7 +752,8 @@ async fn test_adv_success_body_giant_response_bounded() {
         .await;
 
     let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_123")
-        .expect("client creation failed");
+        .expect("client creation failed")
+        .with_ssrf_filter(SsrfFilter::new(true));
 
     let res = client
         .create_record(
@@ -780,7 +798,8 @@ async fn test_adv_success_body_missing_fields_fails_safely() {
             .await;
 
         let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_123")
-            .expect("client creation failed");
+            .expect("client creation failed")
+            .with_ssrf_filter(SsrfFilter::new(true));
 
         let res = client
             .create_record(
@@ -823,7 +842,8 @@ async fn test_adv_rkey_path_traversal_fuzzing() {
         .await;
 
     let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_123")
-        .expect("client creation failed");
+        .expect("client creation failed")
+        .with_ssrf_filter(SsrfFilter::new(true));
 
     let traversal_vectors = vec![
         ".",
@@ -897,7 +917,8 @@ async fn test_adv_rkey_length_boundaries_fuzzing() {
         .await;
 
     let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_123")
-        .expect("client creation failed");
+        .expect("client creation failed")
+        .with_ssrf_filter(SsrfFilter::new(true));
 
     // 1. Boundary: 0 characters (empty string) -> Rejected
     assert!(validate_rkey("").is_err());
@@ -960,7 +981,8 @@ async fn test_adv_rkey_character_set_fuzzing() {
         .await;
 
     let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_123")
-        .expect("client creation failed");
+        .expect("client creation failed")
+        .with_ssrf_filter(SsrfFilter::new(true));
 
     let invalid_chars = vec![
         "space in key",
@@ -1085,7 +1107,9 @@ async fn test_adv_expired_session_fails_fast_zero_network() {
     tokio::time::sleep(Duration::from_millis(5)).await;
     assert!(session.is_expired(), "Session must be marked expired");
 
-    let client = PdsRepoClient::from_session(Arc::new(session)).expect("from_session");
+    let client = PdsRepoClient::from_session(Arc::new(session))
+        .expect("from_session")
+        .with_ssrf_filter(SsrfFilter::new(true));
 
     let res = client
         .create_record(
@@ -1126,7 +1150,8 @@ async fn test_adv_endpoint_url_formatting() {
     // 1. Endpoint with multiple trailing slashes
     let endpoint_with_slashes = format!("{server_uri}////", server_uri = server.uri());
     let client = PdsRepoClient::from_credentials(endpoint_with_slashes, "did:plc:alice", "token")
-        .expect("client creation failed");
+        .expect("client creation failed")
+        .with_ssrf_filter(SsrfFilter::new(true));
 
     let res = client
         .create_record("app.bsky.feed.post", Some("p1"), &json!({}), false)
@@ -1170,7 +1195,8 @@ async fn test_adv_create_record_omits_rkey_when_none() {
         .await;
 
     let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:server_assigned", "token")
-        .expect("client creation failed");
+        .expect("client creation failed")
+        .with_ssrf_filter(SsrfFilter::new(true));
 
     let res = client
         .create_record(
@@ -1218,7 +1244,8 @@ async fn test_adv_concurrent_clients_with_shared_nonce_cache() {
 
     let client = Arc::new(
         PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_123")
-            .expect("client creation failed"),
+            .expect("client creation failed")
+            .with_ssrf_filter(SsrfFilter::new(true)),
     );
 
     let concurrency = 25;

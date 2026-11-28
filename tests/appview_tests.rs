@@ -233,3 +233,114 @@ async fn test_search_actors_typeahead_returns_suggestions() {
     // Empty query performs no network call and returns empty vector.
     assert!(client.search_actors_typeahead("   ", 5).await.is_empty());
 }
+
+#[tokio::test]
+async fn test_get_rejects_oversized_content_length_body() {
+    use skybase::appview::MAX_APPVIEW_BODY_BYTES;
+    use skybase::SkybaseError;
+
+    let server = MockServer::start().await;
+    let oversized_len = MAX_APPVIEW_BODY_BYTES + 1;
+    let pad = "a".repeat(oversized_len.saturating_sub(11));
+    let body = format!(r#"{{"data":"{pad}"}}"#);
+    assert!(body.len() > MAX_APPVIEW_BODY_BYTES);
+
+    Mock::given(method("GET"))
+        .and(path("/xrpc/com.example.oversized"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let res = client
+        .get::<serde_json::Value>("com.example.oversized", &[])
+        .await;
+    assert!(
+        matches!(res, Err(SkybaseError::Internal(_))),
+        "Expected SkybaseError::Internal on oversized Content-Length, got: {res:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_get_rejects_oversized_chunked_stream_without_content_length() {
+    use skybase::appview::MAX_APPVIEW_BODY_BYTES;
+    use skybase::SkybaseError;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback");
+    let addr = listener.local_addr().expect("local addr");
+
+    let server_task = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept");
+        let mut req_buf = [0u8; 1024];
+        let _ = socket.read(&mut req_buf).await;
+
+        let headers = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n";
+        let _ = socket.write_all(headers).await;
+
+        // First chunk opens JSON object
+        let prefix = b"{\"data\":\"";
+        let prefix_hdr = format!("{:x}\r\n", prefix.len());
+        let _ = socket.write_all(prefix_hdr.as_bytes()).await;
+        let _ = socket.write_all(prefix).await;
+        let _ = socket.write_all(b"\r\n").await;
+
+        // Stream 64 KiB chunks past MAX_APPVIEW_BODY_BYTES (33 * 64 KiB > 2 MiB)
+        let chunk = vec![b'x'; 64 * 1024];
+        let chunk_hdr = format!("{:x}\r\n", chunk.len());
+        for _ in 0..34 {
+            if socket.write_all(chunk_hdr.as_bytes()).await.is_err() {
+                break;
+            }
+            if socket.write_all(&chunk).await.is_err() {
+                break;
+            }
+            if socket.write_all(b"\r\n").await.is_err() {
+                break;
+            }
+        }
+        let _ = socket.write_all(b"2\r\n\"}\r\n0\r\n\r\n").await;
+        let _ = socket.shutdown().await;
+    });
+
+    let client = AppViewClient::with_endpoint(format!("http://{addr}"));
+    let res = client
+        .get::<serde_json::Value>("com.example.chunked", &[])
+        .await;
+    let _ = server_task.await;
+
+    assert!(
+        matches!(res, Err(SkybaseError::Internal(_))),
+        "Expected SkybaseError::Internal when chunked stream exceeds {MAX_APPVIEW_BODY_BYTES} bytes, got: {res:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_get_allows_payload_at_exact_2mib_boundary() {
+    use skybase::appview::MAX_APPVIEW_BODY_BYTES;
+
+    let server = MockServer::start().await;
+    let wrapper_len = r#"{"data":""}"#.len();
+    let pad = "a".repeat(MAX_APPVIEW_BODY_BYTES - wrapper_len);
+    let body = format!(r#"{{"data":"{pad}"}}"#);
+    assert_eq!(body.len(), MAX_APPVIEW_BODY_BYTES);
+
+    Mock::given(method("GET"))
+        .and(path("/xrpc/com.example.exact"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let res = client
+        .get::<serde_json::Value>("com.example.exact", &[])
+        .await
+        .expect("exact 2 MiB boundary should succeed");
+    assert_eq!(
+        res["data"].as_str().map(str::len),
+        Some(MAX_APPVIEW_BODY_BYTES - wrapper_len)
+    );
+}

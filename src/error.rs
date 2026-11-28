@@ -59,5 +59,11 @@ impl From<skyauth::error::DPoPError> for SkybaseError {
     }
 }
 
+impl From<skyauth::error::SsrfError> for SkybaseError {
+    fn from(err: skyauth::error::SsrfError) -> Self {
+        SkybaseError::Auth(err.into())
+    }
+}
+
 /// Convenience alias for `Result<T, SkybaseError>`.
 pub type Result<T> = std::result::Result<T, SkybaseError>;

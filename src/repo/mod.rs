@@ -16,5 +16,6 @@ pub use tid::{
 pub use types::{
     extract_did_for_collection, extract_did_from_at_uri, format_at_uri, parse_at_post_uri,
     split_at_uri, validate_rkey, CreateRecordRequest, CreateRecordResult, DeleteRecordRequest,
-    PutRecordRequest, PutRecordResult, RecordView, XrpcErrorResponse,
+    ListRecordEntry, ListRecordsPage, PutRecordRequest, PutRecordResult, RecordView,
+    XrpcErrorResponse,
 };

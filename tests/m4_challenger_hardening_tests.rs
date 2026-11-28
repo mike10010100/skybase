@@ -663,7 +663,8 @@ async fn test_challenger_repo_client_from_credentials_boundaries() {
             "did:plc:sovereign_author",
             "token_valid_123",
         )
-        .expect("repo_client_from_credentials failed");
+        .expect("repo_client_from_credentials failed")
+        .with_ssrf_filter(skyauth::SsrfFilter::new(true));
 
     assert_eq!(client.did(), "did:plc:sovereign_author");
 

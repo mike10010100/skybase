@@ -40,6 +40,7 @@ use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 use skyauth::dpop::{DPoPKey, DPoPNonceCache};
 use skyauth::session::OAuthSession;
+use skyauth::SsrfFilter;
 use skybase::error::SkybaseError;
 use skybase::repo::{format_at_uri, generate_tid, validate_rkey, PdsRepoClient, TidGenerator};
 
@@ -267,7 +268,8 @@ async fn test_challenger_concurrent_writes_shared_client_high_load() {
 
     let client = Arc::new(
         PdsRepoClient::from_credentials(server.uri(), "did:plc:alice_concurrent", "alice_token")
-            .expect("client creation"),
+            .expect("client creation")
+            .with_ssrf_filter(SsrfFilter::new(true)),
     );
 
     let num_tasks = 12;
@@ -355,7 +357,8 @@ async fn test_challenger_concurrent_interleaved_creates_and_deletes() {
             "did:plc:interleave_user",
             "interleave_token",
         )
-        .expect("client creation"),
+        .expect("client creation")
+        .with_ssrf_filter(SsrfFilter::new(true)),
     );
 
     let num_tasks = 16;
@@ -408,7 +411,8 @@ async fn test_challenger_concurrent_cloned_clients_hammer() {
 
     let base_client =
         PdsRepoClient::from_credentials(server.uri(), "did:plc:clone_user", "clone_token")
-            .expect("base client creation");
+            .expect("base client creation")
+            .with_ssrf_filter(SsrfFilter::new(true));
 
     let num_tasks = 12;
     let writes_per_task = 15;
@@ -484,7 +488,8 @@ async fn test_challenger_concurrent_nonce_challenge_storm_and_recovery() {
 
     let client = Arc::new(
         PdsRepoClient::from_credentials(server.uri(), "did:plc:storm_user", "storm_token")
-            .expect("client creation"),
+            .expect("client creation")
+            .with_ssrf_filter(SsrfFilter::new(true)),
     );
 
     // Initial state: nonce cache is completely empty
@@ -584,7 +589,8 @@ async fn test_challenger_concurrent_nonce_rotation_during_flight() {
 
     let client = Arc::new(
         PdsRepoClient::from_credentials(server.uri(), "did:plc:rot_user", "rot_token")
-            .expect("client creation"),
+            .expect("client creation")
+            .with_ssrf_filter(SsrfFilter::new(true)),
     );
 
     // Warm up client with Phase 1 (acquires Nonce A)
@@ -659,7 +665,8 @@ async fn test_challenger_concurrent_infinite_challenge_retry_cap_defense() {
 
     let client = Arc::new(
         PdsRepoClient::from_credentials(server.uri(), "did:plc:loop_user", "loop_token")
-            .expect("client creation"),
+            .expect("client creation")
+            .with_ssrf_filter(SsrfFilter::new(true)),
     );
 
     let mut set = JoinSet::new();
@@ -775,12 +782,14 @@ async fn test_challenger_session_isolation_independent_tenants() {
             "did:plc:alice_tenant",
             "token_alice_secret",
         )
-        .expect("alice client"),
+        .expect("alice client")
+        .with_ssrf_filter(SsrfFilter::new(true)),
     );
 
     let client_bob = Arc::new(
         PdsRepoClient::from_credentials(server_bob.uri(), "did:plc:bob_tenant", "token_bob_secret")
-            .expect("bob client"),
+            .expect("bob client")
+            .with_ssrf_filter(SsrfFilter::new(true)),
     );
 
     let client_charlie = Arc::new(
@@ -789,7 +798,8 @@ async fn test_challenger_session_isolation_independent_tenants() {
             "did:plc:charlie_tenant",
             "token_charlie_secret",
         )
-        .expect("charlie client"),
+        .expect("charlie client")
+        .with_ssrf_filter(SsrfFilter::new(true)),
     );
 
     let mut set = JoinSet::new();
@@ -890,7 +900,8 @@ async fn test_challenger_endpoint_override_preserves_session_integrity() {
         "token_override",
     )
     .expect("creation")
-    .with_endpoint(server_active.uri());
+    .with_endpoint(server_active.uri())
+    .with_ssrf_filter(SsrfFilter::new(true));
 
     assert_eq!(
         client.pds_endpoint().expect("override"),
@@ -972,7 +983,8 @@ async fn test_challenger_bounded_error_body_mitigation_under_concurrency() {
 
     let client = Arc::new(
         PdsRepoClient::from_credentials(server.uri(), "did:plc:flood_user", "flood_token")
-            .expect("client creation"),
+            .expect("client creation")
+            .with_ssrf_filter(SsrfFilter::new(true)),
     );
 
     let mut set = JoinSet::new();
@@ -1030,7 +1042,8 @@ async fn test_challenger_preflight_invalid_rkey_filtering_under_concurrency() {
 
     let client = Arc::new(
         PdsRepoClient::from_credentials(server.uri(), "did:plc:rkey_user", "rkey_token")
-            .expect("client creation"),
+            .expect("client creation")
+            .with_ssrf_filter(SsrfFilter::new(true)),
     );
 
     let invalid_keys = vec![

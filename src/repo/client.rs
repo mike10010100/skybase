@@ -1,19 +1,28 @@
 //! Sovereign PDS write client executing DPoP-signed mutations against an ATProto PDS.
 
 use reqwest::{Client, Method};
+use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::sync::Arc;
+use std::time::Duration;
 use url::Url;
 
 use skyauth::client::AtprotoOAuthClient;
 use skyauth::dpop::{extract_dpop_nonce, normalize_htu, DPoPNonceCache};
 use skyauth::session::OAuthSession;
+use skyauth::ssrf::SsrfFilter;
 
 use crate::error::{Result, SkybaseError};
 use crate::repo::types::{
-    validate_rkey, CreateRecordRequest, CreateRecordResult, DeleteRecordRequest, PutRecordRequest,
-    PutRecordResult, RecordView, XrpcErrorResponse,
+    validate_rkey, CreateRecordRequest, CreateRecordResult, DeleteRecordRequest, ListRecordsPage,
+    PutRecordRequest, PutRecordResult, RecordView, XrpcErrorResponse,
 };
+
+/// Default TCP/TLS connection timeout for outbound PDS requests (5 seconds).
+pub const DEFAULT_PDS_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Default end-to-end HTTP request timeout for outbound PDS requests (15 seconds).
+pub const DEFAULT_PDS_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Maximum bounded body size for error inspection (64 KB).
 const MAX_ERROR_BODY_BYTES: usize = 65_536;
@@ -24,7 +33,7 @@ const MAX_SUCCESS_BODY_BYTES: usize = 1_048_576;
 /// Sovereign PDS repository write client.
 ///
 /// Manages RFC 9449 DPoP authentication, cryptographic proof generation,
-/// and transparent single-retry challenge recovery for ATProto record mutations.
+/// SSRF validation, and transparent single-retry challenge recovery for ATProto record operations.
 #[derive(Clone)]
 pub struct PdsRepoClient {
     session: Arc<OAuthSession>,
@@ -32,19 +41,20 @@ pub struct PdsRepoClient {
     http_client: Client,
     nonce_cache: DPoPNonceCache,
     endpoint_override: Option<String>,
+    ssrf_filter: SsrfFilter,
 }
 
 impl PdsRepoClient {
-    /// Fallible constructor creating a `PdsRepoClient` with strict redirect policies.
+    /// Fallible constructor creating a `PdsRepoClient` with strict redirect, timeout,
+    /// and SSRF-filtering policies (`SsrfFilter::new(false)`).
     ///
     /// # Errors
-    /// Returns [`SkybaseError::Network`] if the underlying HTTP client cannot be built.
+    /// Returns [`SkybaseError::Auth`] if SSRF-pinned HTTP client initialization fails.
     pub fn try_new(session: Arc<OAuthSession>, client: Arc<AtprotoOAuthClient>) -> Result<Self> {
         let nonce_cache = client.nonce_cache().clone();
-        let http_client = Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(SkybaseError::Network)?;
+        let ssrf_filter = SsrfFilter::new(false);
+        let http_client = ssrf_filter
+            .build_http_client(DEFAULT_PDS_CONNECT_TIMEOUT, DEFAULT_PDS_REQUEST_TIMEOUT)?;
 
         Ok(Self {
             session,
@@ -52,18 +62,19 @@ impl PdsRepoClient {
             http_client,
             nonce_cache,
             endpoint_override: None,
+            ssrf_filter,
         })
     }
 
-    /// Fallible constructor directly from an [`OAuthSession`] with a fresh [`DPoPNonceCache`].
+    /// Fallible constructor directly from an [`OAuthSession`] with a fresh [`DPoPNonceCache`]
+    /// and strict SSRF filtering (`SsrfFilter::new(false)`).
     ///
     /// # Errors
-    /// Returns [`SkybaseError::Network`] if the underlying HTTP client cannot be built.
+    /// Returns [`SkybaseError::Auth`] if SSRF-pinned HTTP client initialization fails.
     pub fn try_from_session(session: Arc<OAuthSession>) -> Result<Self> {
-        let http_client = Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(SkybaseError::Network)?;
+        let ssrf_filter = SsrfFilter::new(false);
+        let http_client = ssrf_filter
+            .build_http_client(DEFAULT_PDS_CONNECT_TIMEOUT, DEFAULT_PDS_REQUEST_TIMEOUT)?;
 
         Ok(Self {
             session,
@@ -71,6 +82,7 @@ impl PdsRepoClient {
             http_client,
             nonce_cache: DPoPNonceCache::new(),
             endpoint_override: None,
+            ssrf_filter,
         })
     }
 
@@ -79,7 +91,7 @@ impl PdsRepoClient {
     /// Borrows and shares the [`DPoPNonceCache`] from the OAuth client.
     ///
     /// # Errors
-    /// Returns [`SkybaseError::Network`] if HTTP client creation fails.
+    /// Returns [`SkybaseError::Auth`] if SSRF-pinned HTTP client initialization fails.
     pub fn new(session: Arc<OAuthSession>, client: Arc<AtprotoOAuthClient>) -> Result<Self> {
         Self::try_new(session, client)
     }
@@ -87,7 +99,7 @@ impl PdsRepoClient {
     /// Creates a `PdsRepoClient` directly from an [`OAuthSession`] with a fresh [`DPoPNonceCache`].
     ///
     /// # Errors
-    /// Returns [`SkybaseError::Network`] if HTTP client creation fails.
+    /// Returns [`SkybaseError::Auth`] if SSRF-pinned HTTP client initialization fails.
     pub fn from_session(session: Arc<OAuthSession>) -> Result<Self> {
         Self::try_from_session(session)
     }
@@ -95,8 +107,7 @@ impl PdsRepoClient {
     /// Convenience constructor creating an internal [`OAuthSession`] for manual credentials or testing.
     ///
     /// # Errors
-    /// Returns [`SkybaseError::Auth`] if session initialization fails, or [`SkybaseError::Network`]
-    /// if HTTP client creation fails.
+    /// Returns [`SkybaseError::Auth`] if session or SSRF-pinned HTTP client initialization fails.
     pub fn from_credentials(
         pds_endpoint: impl Into<String>,
         repo_did: impl Into<String>,
@@ -134,6 +145,20 @@ impl PdsRepoClient {
     #[must_use]
     pub fn with_http_client(mut self, client: Client) -> Self {
         self.http_client = client;
+        self
+    }
+
+    /// Configures a custom [`SsrfFilter`] and rebuilds the internal HTTP client
+    /// so DNS resolution pinning matches the filter policy.
+    ///
+    /// Because `with_ssrf_filter` rebuilds `http_client`, any custom
+    /// [`Self::with_http_client`] override should be chained **after** `with_ssrf_filter`.
+    #[must_use]
+    pub fn with_ssrf_filter(mut self, filter: SsrfFilter) -> Self {
+        self.ssrf_filter = filter;
+        self.http_client = filter
+            .build_http_client(DEFAULT_PDS_CONNECT_TIMEOUT, DEFAULT_PDS_REQUEST_TIMEOUT)
+            .unwrap_or_else(|_| filter.pooled_client());
         self
     }
 
@@ -299,6 +324,7 @@ impl PdsRepoClient {
     ///
     /// # Errors
     /// Returns [`SkybaseError::Repo`] if validation fails or server rejects the request,
+    /// [`SkybaseError::Auth`] if SSRF or session checks fail,
     /// [`SkybaseError::Network`] on transport errors, or [`SkybaseError::Serialization`] on JSON errors.
     pub async fn put_record<T: Serialize>(
         &self,
@@ -306,6 +332,35 @@ impl PdsRepoClient {
         rkey: &str,
         record: &T,
         validate: bool,
+    ) -> Result<PutRecordResult> {
+        self.put_record_with_swap(collection, rkey, record, validate, None)
+            .await
+    }
+
+    /// Writes or updates a record in the sovereign PDS repository via `com.atproto.repo.putRecord`,
+    /// optionally enforcing optimistic compare-and-swap against a prior record CID (`swapRecord`).
+    ///
+    /// # Arguments
+    /// - `collection`: The collection NSID (e.g. `"social.skybouncer.config"`).
+    /// - `rkey`: The record key (e.g. `"self"`).
+    /// - `record`: The serializable record payload.
+    /// - `validate`: Whether the PDS should validate the record against its Lexicon schema.
+    /// - `swap_record`: Optional expected CID of the existing record for compare-and-swap.
+    ///
+    /// # Returns
+    /// A [`PutRecordResult`] containing the canonical `uri` and `cid`.
+    ///
+    /// # Errors
+    /// Returns [`SkybaseError::Repo`] if validation fails, `swapRecord` conflicts (`InvalidSwap`),
+    /// or the server rejects the request; [`SkybaseError::Auth`] if SSRF or session checks fail;
+    /// [`SkybaseError::Network`] on transport errors; or [`SkybaseError::Serialization`] on JSON errors.
+    pub async fn put_record_with_swap<T: Serialize>(
+        &self,
+        collection: &str,
+        rkey: &str,
+        record: &T,
+        validate: bool,
+        swap_record: Option<&str>,
     ) -> Result<PutRecordResult> {
         validate_rkey(rkey)?;
 
@@ -316,7 +371,7 @@ impl PdsRepoClient {
             rkey,
             validate,
             record,
-            swap_record: None,
+            swap_record,
             swap_commit: None,
         };
 
@@ -351,6 +406,55 @@ impl PdsRepoClient {
             .to_string();
 
         Ok(PutRecordResult { uri, cid })
+    }
+
+    /// Lists records in a repository collection via `com.atproto.repo.listRecords`
+    /// using DPoP authentication, SSRF validation, nonce retry, and bounded body reads.
+    ///
+    /// The `limit` parameter is clamped to the AT Protocol range `1..=100`.
+    ///
+    /// # Arguments
+    /// - `repo`: The repository DID or handle.
+    /// - `collection`: The collection NSID.
+    /// - `limit`: Maximum number of records per page (clamped to `1..=100`).
+    /// - `cursor`: Optional pagination cursor from a previous [`ListRecordsPage`].
+    ///
+    /// # Errors
+    /// Returns [`SkybaseError::Auth`] if SSRF or session validation fails,
+    /// [`SkybaseError::Repo`] if the URL is invalid, the server rejects the request, or the
+    /// response body exceeds 1 MiB, [`SkybaseError::Network`] on transport errors, or
+    /// [`SkybaseError::Serialization`] on JSON decode errors.
+    pub async fn list_records<T: DeserializeOwned>(
+        &self,
+        repo: &str,
+        collection: &str,
+        limit: u32,
+        cursor: Option<&str>,
+    ) -> Result<ListRecordsPage<T>> {
+        let clamped_limit = limit.clamp(1, 100).to_string();
+        let url_str = self.build_xrpc_url("com.atproto.repo.listRecords")?;
+        let mut parsed_url = Url::parse(&url_str)
+            .map_err(|e| SkybaseError::Repo(format!("Invalid URL '{url_str}': {e}")))?;
+        {
+            let mut qp = parsed_url.query_pairs_mut();
+            qp.append_pair("repo", repo)
+                .append_pair("collection", collection)
+                .append_pair("limit", &clamped_limit);
+            if let Some(c) = cursor.filter(|s| !s.is_empty()) {
+                qp.append_pair("cursor", c);
+            }
+        }
+
+        let resp = self
+            .send_with_nonce_retry(Method::GET, parsed_url.as_str(), None)
+            .await?;
+
+        let resp_bytes = read_bounded_bytes(resp, MAX_SUCCESS_BODY_BYTES).await?;
+
+        let page: ListRecordsPage<T> =
+            serde_json::from_slice(&resp_bytes).map_err(SkybaseError::Serialization)?;
+
+        Ok(page)
     }
 
     /// Fetches a record from a repository via `com.atproto.repo.getRecord`.
@@ -486,6 +590,7 @@ impl PdsRepoClient {
         let mut attempts: u32 = 0;
 
         loop {
+            self.ssrf_filter.validate_url(&parsed_url)?;
             attempts = attempts.saturating_add(1);
 
             // 1. Retrieve current cached nonce for origin
@@ -792,7 +897,8 @@ mod tests {
 
         let client =
             PdsRepoClient::from_credentials(server.uri(), "did:plc:test_user", "test_access_token")
-                .expect("client creation failed");
+                .expect("client creation failed")
+                .with_ssrf_filter(SsrfFilter::new(true));
 
         let res = client
             .create_record(
@@ -825,7 +931,8 @@ mod tests {
 
         let client =
             PdsRepoClient::from_credentials(server.uri(), "did:plc:test_user", "test_access_token")
-                .expect("client creation failed");
+                .expect("client creation failed")
+                .with_ssrf_filter(SsrfFilter::new(true));
 
         let res = client
             .delete_record("app.bsky.feed.post", "post_to_delete")
@@ -866,7 +973,8 @@ mod tests {
             .await;
 
         let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_xyz")
-            .expect("client creation failed");
+            .expect("client creation failed")
+            .with_ssrf_filter(SsrfFilter::new(true));
 
         let res = client
             .create_record(
@@ -917,7 +1025,8 @@ mod tests {
             .await;
 
         let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_xyz")
-            .expect("client creation failed");
+            .expect("client creation failed")
+            .with_ssrf_filter(SsrfFilter::new(true));
 
         let res = client
             .create_record(
@@ -954,7 +1063,8 @@ mod tests {
             .await;
 
         let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_xyz")
-            .expect("client creation failed");
+            .expect("client creation failed")
+            .with_ssrf_filter(SsrfFilter::new(true));
 
         let res = client
             .create_record(
@@ -990,7 +1100,8 @@ mod tests {
             .await;
 
         let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_xyz")
-            .expect("client creation failed");
+            .expect("client creation failed")
+            .with_ssrf_filter(SsrfFilter::new(true));
 
         let res = client
             .create_record(
@@ -1026,7 +1137,8 @@ mod tests {
             .await;
 
         let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_xyz")
-            .expect("client creation failed");
+            .expect("client creation failed")
+            .with_ssrf_filter(SsrfFilter::new(true));
 
         let res = client
             .create_record("app.bsky.feed.post", Some("p1"), &json!({}), true)
@@ -1082,7 +1194,8 @@ mod tests {
             .await;
 
         let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_xyz")
-            .expect("client creation failed");
+            .expect("client creation failed")
+            .with_ssrf_filter(SsrfFilter::new(true));
 
         let res = client
             .create_record("app.bsky.feed.post", None, &json!({ "text": "hi" }), true)
@@ -1114,7 +1227,8 @@ mod tests {
             .await;
 
         let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_xyz")
-            .expect("client creation failed");
+            .expect("client creation failed")
+            .with_ssrf_filter(SsrfFilter::new(true));
 
         let res = client
             .create_record("app.bsky.feed.post", None, &json!({ "text": "hi" }), true)
@@ -1147,5 +1261,534 @@ mod tests {
         let client = PdsRepoClient::try_from_session(session)
             .expect("try_from_session should succeed with valid parameters");
         assert_eq!(client.did(), "did:plc:alice");
+    }
+
+    #[tokio::test]
+    async fn test_client_ssrf_default_blocks_ip_literals_and_non_https() {
+        use skyauth::error::{AtprotoOAuthError, SsrfError};
+        use wiremock::matchers::any;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        // 1. Default client rejects http://127.0.0.1:<port> with 0 network hits
+        let default_client =
+            PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_xyz")
+                .expect("client creation failed");
+        let res = default_client
+            .create_record(
+                "app.bsky.feed.post",
+                Some("p1"),
+                &json!({ "text": "hi" }),
+                false,
+            )
+            .await;
+        assert!(matches!(
+            res,
+            Err(SkybaseError::Auth(AtprotoOAuthError::Ssrf(
+                SsrfError::InsecureScheme(_)
+            )))
+        ));
+
+        // 2. Blocks HTTPS IP literals (127.0.0.1, [::1], 10.0.0.1) as BlockedIp
+        for ip_url in [
+            "https://127.0.0.1:443",
+            "https://[::1]:443",
+            "https://10.0.0.1",
+        ] {
+            let client = PdsRepoClient::from_credentials(ip_url, "did:plc:alice", "token_xyz")
+                .expect("client creation failed");
+            let err = client
+                .get_record("did:plc:alice", "app.bsky.feed.post", "p1")
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    SkybaseError::Auth(AtprotoOAuthError::Ssrf(SsrfError::BlockedIp(_)))
+                ),
+                "Expected BlockedIp for {ip_url}, got: {err:?}"
+            );
+        }
+
+        // 3. Blocks cloud metadata IP & hostname as BlockedHost
+        for metadata_url in [
+            "https://169.254.169.254",
+            "https://metadata.google.internal",
+        ] {
+            let metadata_client =
+                PdsRepoClient::from_credentials(metadata_url, "did:plc:alice", "token_xyz")
+                    .expect("client creation failed");
+            let err = metadata_client
+                .list_records::<serde_json::Value>("did:plc:alice", "app.bsky.feed.post", 10, None)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    SkybaseError::Auth(AtprotoOAuthError::Ssrf(SsrfError::BlockedHost(_)))
+                ),
+                "Expected BlockedHost for {metadata_url}, got: {err:?}"
+            );
+        }
+
+        // 4. Blocks explicit non-HTTPS external domain
+        let http_client =
+            PdsRepoClient::from_credentials("http://example.com", "did:plc:alice", "token_xyz")
+                .expect("client creation failed");
+        let err = http_client
+            .delete_record("app.bsky.feed.post", "p1")
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SkybaseError::Auth(AtprotoOAuthError::Ssrf(SsrfError::InsecureScheme(_)))
+        ));
+
+        // 5. .with_endpoint("https://169.254.169.254") is blocked across all XRPC methods
+        let overridden = PdsRepoClient::from_credentials(
+            "https://pds.example.com",
+            "did:plc:alice",
+            "token_xyz",
+        )
+        .expect("client creation failed")
+        .with_endpoint("https://169.254.169.254");
+
+        assert!(matches!(
+            overridden
+                .create_record("app.bsky.feed.post", Some("p1"), &json!({}), false)
+                .await,
+            Err(SkybaseError::Auth(AtprotoOAuthError::Ssrf(
+                SsrfError::BlockedHost(_)
+            )))
+        ));
+        assert!(matches!(
+            overridden
+                .get_record("did:plc:alice", "app.bsky.feed.post", "p1")
+                .await,
+            Err(SkybaseError::Auth(AtprotoOAuthError::Ssrf(
+                SsrfError::BlockedHost(_)
+            )))
+        ));
+        assert!(matches!(
+            overridden
+                .put_record_with_swap("app.bsky.feed.post", "p1", &json!({}), false, None)
+                .await,
+            Err(SkybaseError::Auth(AtprotoOAuthError::Ssrf(
+                SsrfError::BlockedHost(_)
+            )))
+        ));
+        assert!(matches!(
+            overridden
+                .list_records::<serde_json::Value>("did:plc:alice", "app.bsky.feed.post", 10, None)
+                .await,
+            Err(SkybaseError::Auth(AtprotoOAuthError::Ssrf(
+                SsrfError::BlockedHost(_)
+            )))
+        ));
+        assert!(matches!(
+            overridden.delete_record("app.bsky.feed.post", "p1").await,
+            Err(SkybaseError::Auth(AtprotoOAuthError::Ssrf(
+                SsrfError::BlockedHost(_)
+            )))
+        ));
+        assert!(matches!(
+            overridden.upload_blob("image/png", vec![1, 2, 3]).await,
+            Err(SkybaseError::Auth(AtprotoOAuthError::Ssrf(
+                SsrfError::BlockedHost(_)
+            )))
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_client_with_ssrf_filter_rebuilds_http_client_for_localhost_and_blocks_external_http(
+    ) {
+        use skyauth::error::{AtprotoOAuthError, SsrfError};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/xrpc/com.atproto.repo.getRecord"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "uri": "at://did:plc:alice/app.bsky.feed.post/p1",
+                "cid": "bafy_localhost",
+                "value": { "text": "ok" }
+            })))
+            .mount(&server)
+            .await;
+
+        let parsed = Url::parse(&server.uri()).expect("valid wiremock uri");
+        let port = parsed.port().expect("wiremock port");
+        let localhost_url = format!("http://localhost:{port}");
+
+        // 1. Default client blocks http://localhost:<port>
+        let default_client =
+            PdsRepoClient::from_credentials(&localhost_url, "did:plc:alice", "token_xyz")
+                .expect("client creation failed");
+        assert!(matches!(
+            default_client
+                .get_record("did:plc:alice", "app.bsky.feed.post", "p1")
+                .await,
+            Err(SkybaseError::Auth(AtprotoOAuthError::Ssrf(
+                SsrfError::InsecureScheme(_)
+            )))
+        ));
+
+        // 2. with_ssrf_filter(SsrfFilter::new(true)) rebuilds http_client + SsrfDnsResolver
+        //    and succeeds against both http://localhost:<port> and http://127.0.0.1:<port>
+        let localhost_client = default_client.with_ssrf_filter(SsrfFilter::new(true));
+        let view_localhost = localhost_client
+            .get_record("did:plc:alice", "app.bsky.feed.post", "p1")
+            .await
+            .expect("http://localhost:<port> must succeed when allow_insecure_localhost=true");
+        assert_eq!(view_localhost.cid, "bafy_localhost");
+
+        let loopback_client =
+            PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_xyz")
+                .expect("client creation failed")
+                .with_ssrf_filter(SsrfFilter::new(true));
+        let view_loopback = loopback_client
+            .get_record("did:plc:alice", "app.bsky.feed.post", "p1")
+            .await
+            .expect("http://127.0.0.1:<port> must succeed when allow_insecure_localhost=true");
+        assert_eq!(view_loopback.cid, "bafy_localhost");
+
+        // 3. Even with allow_insecure_localhost=true, external http:// and restricted IPs are blocked
+        let ext_http =
+            PdsRepoClient::from_credentials("http://example.com", "did:plc:alice", "token_xyz")
+                .expect("client creation failed")
+                .with_ssrf_filter(SsrfFilter::new(true));
+        assert!(matches!(
+            ext_http
+                .get_record("did:plc:alice", "app.bsky.feed.post", "p1")
+                .await,
+            Err(SkybaseError::Auth(AtprotoOAuthError::Ssrf(
+                SsrfError::InsecureScheme(_)
+            )))
+        ));
+
+        let metadata_ip = ext_http.clone().with_endpoint("https://169.254.169.254");
+        assert!(matches!(
+            metadata_ip
+                .get_record("did:plc:alice", "app.bsky.feed.post", "p1")
+                .await,
+            Err(SkybaseError::Auth(AtprotoOAuthError::Ssrf(
+                SsrfError::BlockedHost(_)
+            )))
+        ));
+
+        let private_ip = ext_http.with_endpoint("https://10.0.0.1");
+        assert!(matches!(
+            private_ip
+                .get_record("did:plc:alice", "app.bsky.feed.post", "p1")
+                .await,
+            Err(SkybaseError::Auth(AtprotoOAuthError::Ssrf(
+                SsrfError::BlockedIp(_)
+            )))
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_client_enforces_request_timeout() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        assert_eq!(DEFAULT_PDS_CONNECT_TIMEOUT, Duration::from_secs(5));
+        assert_eq!(DEFAULT_PDS_REQUEST_TIMEOUT, Duration::from_secs(15));
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/xrpc/com.atproto.repo.getRecord"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(500))
+                    .set_body_json(json!({
+                        "uri": "at://did:plc:alice/app.bsky.feed.post/p1",
+                        "cid": "bafy",
+                        "value": {}
+                    })),
+            )
+            .mount(&server)
+            .await;
+
+        let short_filter = SsrfFilter::new(true);
+        let short_http = short_filter
+            .build_http_client(Duration::from_secs(2), Duration::from_millis(50))
+            .expect("build_http_client");
+        let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_xyz")
+            .expect("client creation failed")
+            .with_ssrf_filter(short_filter)
+            .with_http_client(short_http);
+
+        let err = client
+            .get_record("did:plc:alice", "app.bsky.feed.post", "p1")
+            .await
+            .unwrap_err();
+        match err {
+            SkybaseError::Network(net_err) => {
+                assert!(
+                    net_err.is_timeout(),
+                    "Expected timeout error, got: {net_err}"
+                );
+            }
+            other => panic!("Expected SkybaseError::Network timeout, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_client_put_record_with_swap_some_and_none() {
+        use wiremock::matchers::{header_exists, method, path};
+        use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/xrpc/com.atproto.repo.putRecord"))
+            .and(header_exists("authorization"))
+            .and(header_exists("dpop"))
+            .respond_with(|req: &Request| {
+                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                let cid = match body.get("swapRecord").and_then(|v| v.as_str()) {
+                    Some("bafy_prev_cid") => "bafy_swapped_cid",
+                    None => "bafy_unconditional_cid",
+                    Some(other) => {
+                        return ResponseTemplate::new(400).set_body_json(json!({
+                            "error": "UnexpectedSwap",
+                            "message": format!("Unexpected swapRecord: {other}")
+                        }));
+                    }
+                };
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "uri": "at://did:plc:alice/social.skybouncer.config/self",
+                    "cid": cid
+                }))
+            })
+            .mount(&server)
+            .await;
+
+        let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_xyz")
+            .expect("client creation failed")
+            .with_ssrf_filter(SsrfFilter::new(true));
+
+        let swapped = client
+            .put_record_with_swap(
+                "social.skybouncer.config",
+                "self",
+                &json!({ "mode": "strict" }),
+                true,
+                Some("bafy_prev_cid"),
+            )
+            .await
+            .expect("put_record_with_swap(Some) should succeed");
+        assert_eq!(
+            swapped.uri,
+            "at://did:plc:alice/social.skybouncer.config/self"
+        );
+        assert_eq!(swapped.cid, "bafy_swapped_cid");
+
+        let unswapped_via_put = client
+            .put_record(
+                "social.skybouncer.config",
+                "self",
+                &json!({ "mode": "relaxed" }),
+                false,
+            )
+            .await
+            .expect("put_record should omit swapRecord");
+        assert_eq!(unswapped_via_put.cid, "bafy_unconditional_cid");
+
+        let unswapped_explicit = client
+            .put_record_with_swap(
+                "social.skybouncer.config",
+                "self",
+                &json!({ "mode": "relaxed" }),
+                false,
+                None,
+            )
+            .await
+            .expect("put_record_with_swap(None) should omit swapRecord");
+        assert_eq!(unswapped_explicit.cid, "bafy_unconditional_cid");
+    }
+
+    #[tokio::test]
+    async fn test_client_put_record_with_swap_invalid_swap_and_rkey_preflight() {
+        use wiremock::matchers::{any, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/xrpc/com.atproto.repo.putRecord"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                "error": "InvalidSwap",
+                "message": "Record swap failed"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_xyz")
+            .expect("client creation failed")
+            .with_ssrf_filter(SsrfFilter::new(true));
+
+        // 1. Invalid rkey fails preflight with 0 requests
+        let preflight_err = client
+            .put_record_with_swap(
+                "social.skybouncer.config",
+                "..",
+                &json!({ "mode": "strict" }),
+                true,
+                Some("bafy_prev"),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(preflight_err, SkybaseError::Repo(_)));
+
+        // 2. Valid rkey hits mock server once and propagates InvalidSwap
+        let swap_err = client
+            .put_record_with_swap(
+                "social.skybouncer.config",
+                "self",
+                &json!({ "mode": "strict" }),
+                true,
+                Some("bafy_stale"),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(swap_err, SkybaseError::Repo(_)));
+        assert!(
+            swap_err.to_string().contains("InvalidSwap"),
+            "Expected InvalidSwap, got: {swap_err}"
+        );
+
+        let _ = any();
+    }
+
+    #[tokio::test]
+    async fn test_client_list_records_auth_query_pagination_and_body_cap() {
+        use serde::Deserialize;
+        use wiremock::matchers::{header_exists, method, path, query_param};
+        use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+        #[derive(Debug, Deserialize, PartialEq, Eq)]
+        struct EntryPayload {
+            name: String,
+        }
+
+        let server = MockServer::start().await;
+
+        // Page 1: 401 use_dpop_nonce once -> 200 with cursor
+        Mock::given(method("GET"))
+            .and(path("/xrpc/com.atproto.repo.listRecords"))
+            .and(query_param("repo", "did:plc:alice"))
+            .and(query_param("collection", "com.example.list"))
+            .and(query_param("limit", "100")) // clamped from 250 -> 100
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .insert_header("DPoP-Nonce", "list_nonce_1")
+                    .set_body_json(json!({
+                        "error": "use_dpop_nonce",
+                        "message": "Nonce required"
+                    })),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/xrpc/com.atproto.repo.listRecords"))
+            .and(query_param("repo", "did:plc:alice"))
+            .and(query_param("collection", "com.example.list"))
+            .and(query_param("limit", "100"))
+            .and(query_param("cursor", "cur+a/b=1"))
+            .and(header_exists("authorization"))
+            .and(header_exists("dpop"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "records": [{
+                    "uri": "at://did:plc:alice/com.example.list/2",
+                    "cid": "cid_2",
+                    "value": { "name": "second" }
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/xrpc/com.atproto.repo.listRecords"))
+            .and(query_param("repo", "did:plc:alice"))
+            .and(query_param("collection", "com.example.list"))
+            .and(query_param("limit", "100"))
+            .and(header_exists("authorization"))
+            .and(header_exists("dpop"))
+            .respond_with(|req: &Request| {
+                assert!(
+                    req.url.query_pairs().all(|(k, _)| k != "cursor"),
+                    "Page 1 must omit cursor query parameter"
+                );
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "records": [{
+                        "uri": "at://did:plc:alice/com.example.list/1",
+                        "cid": "cid_1",
+                        "value": { "name": "first" }
+                    }],
+                    "cursor": "cur+a/b=1"
+                }))
+            })
+            .mount(&server)
+            .await;
+
+        let client = PdsRepoClient::from_credentials(server.uri(), "did:plc:alice", "token_xyz")
+            .expect("client creation failed")
+            .with_ssrf_filter(SsrfFilter::new(true));
+
+        let page1 = client
+            .list_records::<EntryPayload>("did:plc:alice", "com.example.list", 250, None)
+            .await
+            .expect("page 1 should succeed after nonce retry");
+        assert_eq!(page1.records.len(), 1);
+        assert_eq!(page1.records[0].value.name, "first");
+        assert_eq!(page1.cursor.as_deref(), Some("cur+a/b=1"));
+
+        let page2 = client
+            .list_records::<EntryPayload>(
+                "did:plc:alice",
+                "com.example.list",
+                100,
+                page1.cursor.as_deref(),
+            )
+            .await
+            .expect("page 2 with URL-encoded cursor should succeed");
+        assert_eq!(page2.records.len(), 1);
+        assert_eq!(page2.records[0].value.name, "second");
+        assert!(page2.cursor.is_none());
+
+        // Oversized >1 MiB list_records response must be rejected
+        let oversized_server = MockServer::start().await;
+        let huge_text = "z".repeat(MAX_SUCCESS_BODY_BYTES + 1024);
+        let huge_body = format!(
+            r#"{{"records":[{{"uri":"at://did:plc:alice/com.example.list/1","cid":"c1","value":{{"name":"{huge_text}"}}}}]}}"#
+        );
+        Mock::given(method("GET"))
+            .and(path("/xrpc/com.atproto.repo.listRecords"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(huge_body, "application/json"))
+            .mount(&oversized_server)
+            .await;
+
+        let oversized_client =
+            PdsRepoClient::from_credentials(oversized_server.uri(), "did:plc:alice", "token_xyz")
+                .expect("client creation failed")
+                .with_ssrf_filter(SsrfFilter::new(true));
+        let err = oversized_client
+            .list_records::<EntryPayload>("did:plc:alice", "com.example.list", 50, None)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("exceeded maximum limit"),
+            "Expected body cap error, got: {err}"
+        );
     }
 }
