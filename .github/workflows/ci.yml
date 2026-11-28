@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
     steps:
       - name: Checkout repository with full history
         uses: actions/checkout@v7
@@ -44,13 +44,7 @@ jobs:
       - name: Checkout skybase
         uses: actions/checkout@v7
         with:
-          path: skybase
-
-      - name: Checkout sibling dependency (skyauth)
-        uses: actions/checkout@v7
-        with:
-          repository: mike10010100/skyauth
-          path: skyauth
+          persist-credentials: false
 
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -59,10 +53,6 @@ jobs:
 
       - name: Enable Rust Cache
         uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            skybase -> skybase/target
-            skyauth -> skyauth/target
 
       - name: Install Cargo Deny & llvm-cov
         uses: taiki-e/install-action@v2
@@ -70,23 +60,19 @@ jobs:
           tool: cargo-deny,cargo-llvm-cov
 
       - name: 1. Enforce Code Formatting
-        working-directory: skybase
         run: cargo fmt --all -- --check
 
       - name: 2. Enforce Strict Clippy Lints
-        working-directory: skybase
         run: |
           cargo clippy --all-targets --all-features -- -D warnings
           cargo clippy --lib --no-default-features -- -D warnings
 
       - name: 3. Run All Test Suites & Coverage Gate (≥ 85%)
-        working-directory: skybase
         run: |
           cargo llvm-cov --all-targets --all-features --fail-under-lines 85
           cargo test --lib --no-default-features
 
       - name: 4. Dependency Governance & Advisory Scan (cargo-deny)
-        working-directory: skybase
         run: cargo deny check
 
   publish:
@@ -101,21 +87,13 @@ jobs:
       - name: Checkout skybase
         uses: actions/checkout@v7
         with:
-          path: skybase
           persist-credentials: false
-
-      - name: Checkout sibling dependency (skyauth)
-        uses: actions/checkout@v7
-        with:
-          repository: mike10010100/skyauth
-          path: skyauth
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Extract Current Version & Name
         id: pkg_info
-        working-directory: skybase
         run: |
           VERSION=$(grep -m1 '^[[:space:]]*version[[:space:]]*=' Cargo.toml | awk -F'"' '{print $2}')
           NAME=$(grep -m1 '^[[:space:]]*name[[:space:]]*=' Cargo.toml | awk -F'"' '{print $2}')
@@ -137,12 +115,10 @@ jobs:
 
       - name: Validate package before publish
         if: steps.check_published.outputs.published == 'false'
-        working-directory: skybase
         run: cargo publish --dry-run --allow-dirty
 
       - name: Publish to Crates.io
         if: steps.check_published.outputs.published == 'false'
-        working-directory: skybase
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
@@ -155,7 +131,6 @@ jobs:
 
       - name: Create or Update GitHub Release Tag
         if: steps.check_published.outputs.published == 'false'
-        working-directory: skybase
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: "v${{ steps.pkg_info.outputs.version }}"

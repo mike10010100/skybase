@@ -18,8 +18,8 @@ name = "skybase"
 path = "src/lib.rs"
 
 [dependencies]
-# Identity & OAuth 2.1 Engine
-skyauth = { path = "../skyauth", version = "0.3.14" }
+# Identity & OAuth 2.1 Engine (consumed from crates.io)
+skyauth = "0.3.14"
 
 # Concurrency & Async Runtime
 tokio = { version = "1.53.3", default-features = false, features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
