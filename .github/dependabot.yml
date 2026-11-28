@@ -1,5 +1,17 @@
 version: 2
 updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      rust-dependencies:
+        patterns: ["*"]
+    ignore:
+      # parking_lot 0.13+ requires rustc 1.95, exceeding skybase's MSRV (1.89)
+      - dependency-name: "parking_lot"
+        versions: [">= 0.13.0"]
+
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
