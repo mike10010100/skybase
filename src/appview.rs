@@ -6,6 +6,7 @@
 //! or decode failure — so callers can enrich opportunistically without coupling
 //! their pipelines to AppView availability.
 
+use futures_util::StreamExt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -23,6 +24,9 @@ pub const DEFAULT_APPVIEW_TIMEOUT_MS: u64 = 1500;
 
 /// Maximum number of pages followed by [`AppViewClient::paginate`].
 pub const DEFAULT_MAX_PAGES: usize = 100;
+
+/// Maximum response body size accepted by [`AppViewClient::get`] (2 MiB).
+pub const MAX_APPVIEW_BODY_BYTES: usize = 2 * 1024 * 1024;
 
 /// Profile metadata returned by `app.bsky.actor.getProfile`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -149,9 +153,13 @@ impl AppViewClient {
 
     /// Performs a GET against an AppView XRPC endpoint and decodes the JSON response.
     ///
+    /// Responses are bounded to [`MAX_APPVIEW_BODY_BYTES`] via both an upfront
+    /// `Content-Length` check and incremental streaming byte counting.
+    ///
     /// # Errors
-    /// Returns [`SkybaseError::Network`] on transport failure or
-    /// [`SkybaseError::Serialization`] on a non-success status or decode failure.
+    /// Returns [`SkybaseError::Network`] on transport or stream failure,
+    /// [`SkybaseError::Internal`] on a non-success HTTP status or if the response
+    /// exceeds [`MAX_APPVIEW_BODY_BYTES`], or [`SkybaseError::Serialization`] on JSON decode failure.
     pub async fn get<T: DeserializeOwned>(
         &self,
         endpoint: &str,
@@ -165,7 +173,25 @@ impl AppViewClient {
                 resp.status()
             )));
         }
-        let body = resp.json::<T>().await?;
+        if let Some(len) = resp.content_length() {
+            if len > MAX_APPVIEW_BODY_BYTES as u64 {
+                return Err(SkybaseError::Internal(format!(
+                    "AppView {endpoint} response Content-Length {len} exceeds {MAX_APPVIEW_BODY_BYTES} byte limit"
+                )));
+            }
+        }
+        let mut stream = resp.bytes_stream();
+        let mut buf = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            if buf.len().saturating_add(chunk.len()) > MAX_APPVIEW_BODY_BYTES {
+                return Err(SkybaseError::Internal(format!(
+                    "AppView {endpoint} response body exceeded {MAX_APPVIEW_BODY_BYTES} byte limit"
+                )));
+            }
+            buf.extend_from_slice(&chunk);
+        }
+        let body = serde_json::from_slice::<T>(&buf)?;
         Ok(body)
     }
 

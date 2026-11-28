@@ -53,7 +53,8 @@ async fn test_tier4_scenario1_complete_vertical_slice_loop() {
 
     let pds_client = skybase
         .repo_client_from_credentials(mock_pds.uri(), user_did, "oauth_dpop_token_alice")
-        .expect("pds repo client creation failed");
+        .expect("pds repo client creation failed")
+        .with_ssrf_filter(skyauth::SsrfFilter::new(true));
 
     // 2. Step 1: Sovereign PDS Record Creation with DPoP
     let review_payload = json!({

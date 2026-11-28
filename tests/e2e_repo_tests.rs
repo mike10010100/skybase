@@ -8,6 +8,7 @@ mod common;
 
 use common::MockPdsServer;
 use serde_json::json;
+use skyauth::SsrfFilter;
 use skybase::repo::PdsRepoClient;
 
 fn create_client(
@@ -15,7 +16,9 @@ fn create_client(
     did: impl Into<String>,
     token: impl Into<String>,
 ) -> PdsRepoClient {
-    PdsRepoClient::from_credentials(endpoint, did, token).expect("client creation failed")
+    PdsRepoClient::from_credentials(endpoint, did, token)
+        .expect("client creation failed")
+        .with_ssrf_filter(SsrfFilter::new(true))
 }
 
 // ============================================================================
@@ -248,4 +251,183 @@ async fn test_tier3_p01_pds_write_lifecycle_create_and_delete() {
     // 2. Delete record
     let delete_res = client.delete_record("app.bsky.feed.post", "cycle_p1").await;
     assert!(delete_res.is_ok(), "delete should succeed");
+}
+
+#[tokio::test]
+async fn test_tier1_f06_pds_client_put_record_with_swap_and_get_record() {
+    use wiremock::matchers::{header_exists, method, path, query_param};
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let did = "did:plc:swap_user";
+    let collection = "social.skybouncer.config";
+    let rkey = "self";
+
+    // Initial put_record (no swapRecord)
+    Mock::given(method("POST"))
+        .and(path("/xrpc/com.atproto.repo.putRecord"))
+        .and(header_exists("authorization"))
+        .and(header_exists("dpop"))
+        .respond_with(|req: &Request| {
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
+            match body.get("swapRecord").and_then(|v| v.as_str()) {
+                None => ResponseTemplate::new(200).set_body_json(json!({
+                    "uri": "at://did:plc:swap_user/social.skybouncer.config/self",
+                    "cid": "bafyrei_v1"
+                })),
+                Some("bafyrei_v1") => ResponseTemplate::new(200).set_body_json(json!({
+                    "uri": "at://did:plc:swap_user/social.skybouncer.config/self",
+                    "cid": "bafyrei_v2"
+                })),
+                Some(_) => ResponseTemplate::new(400).set_body_json(json!({
+                    "error": "InvalidSwap",
+                    "message": "Record swap CID mismatch"
+                })),
+            }
+        })
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/xrpc/com.atproto.repo.getRecord"))
+        .and(query_param("repo", did))
+        .and(query_param("collection", collection))
+        .and(query_param("rkey", rkey))
+        .and(header_exists("authorization"))
+        .and(header_exists("dpop"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "uri": "at://did:plc:swap_user/social.skybouncer.config/self",
+            "cid": "bafyrei_v2",
+            "value": { "enabled": true, "version": 2 }
+        })))
+        .mount(&server)
+        .await;
+
+    let client = create_client(server.uri(), did, "token_swap");
+
+    let initial = client
+        .put_record(
+            collection,
+            rkey,
+            &json!({ "enabled": true, "version": 1 }),
+            true,
+        )
+        .await
+        .expect("initial put_record should succeed");
+    assert_eq!(initial.cid, "bafyrei_v1");
+
+    let updated = client
+        .put_record_with_swap(
+            collection,
+            rkey,
+            &json!({ "enabled": true, "version": 2 }),
+            true,
+            Some(&initial.cid),
+        )
+        .await
+        .expect("put_record_with_swap matching CID should succeed");
+    assert_eq!(updated.cid, "bafyrei_v2");
+
+    let conflict = client
+        .put_record_with_swap(
+            collection,
+            rkey,
+            &json!({ "enabled": false, "version": 3 }),
+            true,
+            Some("bafyrei_stale"),
+        )
+        .await;
+    assert!(conflict.is_err());
+    let err_msg = conflict.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("InvalidSwap"),
+        "Expected InvalidSwap error, got: {err_msg}"
+    );
+
+    let fetched = client
+        .get_record(did, collection, rkey)
+        .await
+        .expect("get_record should succeed");
+    assert_eq!(fetched.cid, "bafyrei_v2");
+    assert_eq!(fetched.value["version"], 2);
+}
+
+#[tokio::test]
+async fn test_tier1_f07_pds_client_list_records_cursor_pagination() {
+    use serde::Deserialize;
+    use wiremock::matchers::{header_exists, method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[derive(Debug, Deserialize, PartialEq, Eq)]
+    struct ItemRecord {
+        title: String,
+    }
+
+    let server = MockServer::start().await;
+    let did = "did:plc:list_user";
+    let collection = "com.example.item";
+
+    // Page 2 (with cursor)
+    Mock::given(method("GET"))
+        .and(path("/xrpc/com.atproto.repo.listRecords"))
+        .and(query_param("repo", did))
+        .and(query_param("collection", collection))
+        .and(query_param("limit", "2"))
+        .and(query_param("cursor", "page_2_cursor"))
+        .and(header_exists("authorization"))
+        .and(header_exists("dpop"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "records": [{
+                "uri": "at://did:plc:list_user/com.example.item/r3",
+                "cid": "cid_3",
+                "value": { "title": "Item 3" }
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    // Page 1 (no cursor)
+    Mock::given(method("GET"))
+        .and(path("/xrpc/com.atproto.repo.listRecords"))
+        .and(query_param("repo", did))
+        .and(query_param("collection", collection))
+        .and(query_param("limit", "2"))
+        .and(header_exists("authorization"))
+        .and(header_exists("dpop"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "records": [
+                {
+                    "uri": "at://did:plc:list_user/com.example.item/r1",
+                    "cid": "cid_1",
+                    "value": { "title": "Item 1" }
+                },
+                {
+                    "uri": "at://did:plc:list_user/com.example.item/r2",
+                    "cid": "cid_2",
+                    "value": { "title": "Item 2" }
+                }
+            ],
+            "cursor": "page_2_cursor"
+        })))
+        .mount(&server)
+        .await;
+
+    let client = create_client(server.uri(), did, "token_list");
+
+    let page1 = client
+        .list_records::<ItemRecord>(did, collection, 2, None)
+        .await
+        .expect("page 1 should succeed");
+    assert_eq!(page1.records.len(), 2);
+    assert_eq!(page1.records[0].value.title, "Item 1");
+    assert_eq!(page1.records[1].value.title, "Item 2");
+    assert_eq!(page1.cursor.as_deref(), Some("page_2_cursor"));
+
+    let page2 = client
+        .list_records::<ItemRecord>(did, collection, 2, page1.cursor.as_deref())
+        .await
+        .expect("page 2 should succeed");
+    assert_eq!(page2.records.len(), 1);
+    assert_eq!(page2.records[0].value.title, "Item 3");
+    assert!(page2.cursor.is_none());
 }

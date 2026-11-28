@@ -73,9 +73,9 @@ pub use lexicon::{
 pub use repo::{
     decode_tid_timestamp_secs, decode_tid_timestamp_us, extract_did_for_collection,
     extract_did_from_at_uri, format_at_uri, generate_tid, parse_at_post_uri, split_at_uri,
-    validate_rkey, CreateRecordRequest, CreateRecordResult, DeleteRecordRequest, PdsRepoClient,
-    PutRecordRequest, PutRecordResult, RecordView, TidGenerator, XrpcErrorResponse,
-    MAX_PLAUSIBLE_TID_EPOCH_SECS, MIN_PLAUSIBLE_TID_EPOCH_SECS,
+    validate_rkey, CreateRecordRequest, CreateRecordResult, DeleteRecordRequest, ListRecordEntry,
+    ListRecordsPage, PdsRepoClient, PutRecordRequest, PutRecordResult, RecordView, TidGenerator,
+    XrpcErrorResponse, MAX_PLAUSIBLE_TID_EPOCH_SECS, MIN_PLAUSIBLE_TID_EPOCH_SECS,
 };
 pub use skyauth;
 pub use tokio_util::sync::CancellationToken;
@@ -431,7 +431,7 @@ impl Skybase {
     /// Creates a sovereign PDS repository client bound to the provided OAuth session.
     ///
     /// # Errors
-    /// Returns [`SkybaseError::Network`] if HTTP client initialization fails.
+    /// Returns [`SkybaseError::Auth`] if SSRF-pinned HTTP client initialization fails.
     pub fn repo_client(
         &self,
         session: Arc<skyauth::session::OAuthSession>,
@@ -444,8 +444,7 @@ impl Skybase {
     /// Leverages the facade's internal OAuth client for DPoP proof generation and nonce caching.
     ///
     /// # Errors
-    /// Returns [`SkybaseError::Auth`] if session creation fails, or [`SkybaseError::Network`]
-    /// if HTTP client creation fails.
+    /// Returns [`SkybaseError::Auth`] if session or SSRF-pinned HTTP client initialization fails.
     pub fn repo_client_from_credentials(
         &self,
         pds_endpoint: impl Into<String>,

@@ -81,6 +81,29 @@ pub struct RecordView {
     pub value: serde_json::Value,
 }
 
+/// A single repository record entry returned inside [`ListRecordsPage`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListRecordEntry<T = serde_json::Value> {
+    /// Canonical AT-URI of the record (`at://{did}/{collection}/{rkey}`).
+    pub uri: String,
+    /// Content identifier (CID) hash string.
+    #[serde(default)]
+    pub cid: String,
+    /// Deserialized record payload value.
+    pub value: T,
+}
+
+/// A single page of repository records returned by `com.atproto.repo.listRecords`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListRecordsPage<T = serde_json::Value> {
+    /// Records returned in this page.
+    #[serde(default = "Vec::new")]
+    pub records: Vec<ListRecordEntry<T>>,
+    /// Optional opaque pagination cursor for fetching subsequent pages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
 /// Request payload for `com.atproto.repo.deleteRecord`.
 ///
 /// Removes an existing record from the specified repository and collection.

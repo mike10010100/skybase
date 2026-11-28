@@ -174,7 +174,8 @@ async fn test_challenger_concurrent_closed_loop_writers_ingest_readers_subscribe
             let did = format!("did:plc:writer_{writer_idx}");
             let pds_client = skybase_clone
                 .repo_client_from_credentials(&mock_pds_uri, &did, format!("token_{writer_idx}"))
-                .expect("repo client creation failed");
+                .expect("repo client creation failed")
+                .with_ssrf_filter(skyauth::SsrfFilter::new(true));
 
             for r_idx in 0..records_per_writer {
                 let rkey = format!("rev_{writer_idx}_{r_idx}");
@@ -717,7 +718,8 @@ async fn test_challenger_pds_client_automatic_dpop_nonce_retry_via_facade() {
 
     let pds_client = skybase
         .repo_client_from_credentials(mock_pds.uri(), "did:plc:nonce_challenger", "token_xyz")
-        .expect("repo client creation failed");
+        .expect("repo client creation failed")
+        .with_ssrf_filter(skyauth::SsrfFilter::new(true));
 
     // Mount one-time 401 nonce challenge on Mock PDS
     mock_pds
